@@ -5,6 +5,7 @@
         <link rel="stylesheet" href="resources/@evilbunny/node-red-contrib-zigbee2mqtt/css/multiple-select.css" type="text/css" />
         <link rel="stylesheet" href="resources/@evilbunny/node-red-contrib-zigbee2mqtt/css/common.css" type="text/css" />
 
+
         <div class="form-row">
             <label for="node-input-name" class="l-width"><i class="fa fa-bookmark"></i> <span data-i18n="label.name"></span></label>
             <input type="text" id="node-input-name" data-i18n="[placeholder]placeholder.name">
@@ -109,6 +110,8 @@
         <div class="form-row">
             <input type="checkbox" id="node-input-outputEnabled" style="display: inline-block; width: auto; vertical-align: top;">
             <label for="node-input-outputEnabled" style="width: auto;"><i class="fa fa-share-square"></i> <span data-i18n="label.output_enabled"></span></label>
+            <!-- reflete o nº real de saídas (0/1); o Node-RED liga-o a defaults.outputs -->
+            <input type="hidden" id="node-input-outputs" value="0">
         </div>
 
         <div class="form-row node-input-rule-container-row">
@@ -192,7 +195,11 @@
             inputs: 1,
             // [ORIGINAL] outputs: 1,
             outputs: 0,
-            icon: "icon.png",
+            icon: function () {
+            // Flow Icon definido no nó servidor (reativo); fallback: icon.png
+            var srv = this.server ? RED.nodes.node(this.server) : null;
+            return (srv && srv.flowIcon) ? srv.flowIcon : "icon.png";
+        },
             label: function() {
                 var label = 'z2m-out';
 
@@ -203,6 +210,11 @@
                 } else if (typeof(this.device_id) == 'string') {
                     label = this.device_id;
                 }
+            // Flow Label do nó servidor (reativo: lido a cada redraw)
+            var srvNode = this.server ? RED.nodes.node(this.server) : null;
+            if (srvNode && srvNode.flowLabel) {
+                label = '[' + srvNode.flowLabel + '] ' + label;
+            }
                 return label;
             },
             oneditprepare: function() {
@@ -225,6 +237,15 @@
                 }
  
                 node.z2mEditor = new Zigbee2MqttEditor(node, { 'allow_empty': false, 'mode': 'out' });
+
+                // Sincroniza em tempo real a checkbox com #node-input-outputs (0 ou 1)
+                const syncOutputs = function () {
+                    const enabled = $('#node-input-outputEnabled').is(':checked');
+                    $('#node-input-outputs').val(enabled ? 1 : 0);
+                    d.log('outputs synced:', enabled ? 1 : 0);
+                };
+                $('#node-input-outputEnabled').off('change.z2m_outputs').on('change.z2m_outputs', syncOutputs);
+                syncOutputs();
                 
                 setTimeout(() => {
                     node.z2mEditor.build().then(() => {
