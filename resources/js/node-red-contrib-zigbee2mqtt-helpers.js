@@ -8,7 +8,12 @@ if (typeof window !== 'undefined' && typeof window.Z2MDebug === 'undefined') {
         window.Z2MDebug = { create: function () { return logger; }, isEnabled: function () { return false; } };
     })();
 }
-
+// O módulo de utilitários tem de estar carregado antes deste ficheiro
+// (garantido pela cascata em api.html). Falhar cedo e de forma explícita.
+if (typeof Zigbee2MqttEditorUtils === 'undefined') {
+    console.error('[Z2M Helpers] Zigbee2MqttEditorUtils is missing. ' +
+        'Check the load order in api.html: multiple-select -> editor-utils -> helpers');
+}
 /**
  * ============================================================================
  * ZIGBEE2MQTT EDITOR CLASS - ORGANIZED STRUCTURE
@@ -43,6 +48,7 @@ class Zigbee2MqttEditor {
         this.debug = (typeof Z2MDebug !== 'undefined') ? Z2MDebug.create('Z2M Editor') : console;
         
         this.node = node;
+		this.utils = Zigbee2MqttEditorUtils;
         this.devices = null;
         this._traceLog = []; 
         this.addTrace = (msg) => { 
@@ -685,34 +691,28 @@ class Zigbee2MqttEditor {
         if (devices.length) {
             html = $('<optgroup/>', {label: RED._("@evilbunny/node-red-contrib-zigbee2mqtt/server:editor.devices")});
             html.appendTo(that.getDeviceIdInput());
-            
+			
             // ✅ Filtrar baseado no MODE
             let filteredDevices;
             
             if (that.config.mode === 'out') {
                 // OUT: Mostrar apenas devices com ESCRITA (comandos)
-                filteredDevices = devices.filter(device => {
-                    return that.deviceHasCommandsForDevice(device);
-                });
+                filteredDevices = Zigbee2MqttEditorUtils.filterDevicesByMode(devices, 'out');
                 that.debug.log('|     [buildDeviceIdInput OUT] Total devices:', devices.length);
                 that.debug.log('|     [buildDeviceIdInput OUT] Devices with commands:', filteredDevices.length);
             } else if (that.config.mode === 'in') {
                 // IN: Mostrar apenas devices com LEITURA (sensores)
-                    filteredDevices = devices.filter(device => {
-                    return that.deviceHasReadableExposesForDevice(device);
-                });
+                filteredDevices = Zigbee2MqttEditorUtils.filterDevicesByMode(devices, 'in');
                 that.debug.log('|     [buildDeviceIdInput IN] Total devices:', devices.length);
                 that.debug.log('|     [buildDeviceIdInput IN] Devices with readable:', filteredDevices.length);
             } else if (that.config.mode === 'all') {
                 // ALL: Mostrar TODOS os devices - MESMO o Coordinator
-                filteredDevices = devices;
+                filteredDevices = Zigbee2MqttEditorUtils.filterDevicesByMode(devices, 'all');
                 that.debug.log('|     [buildDeviceIdInput ALL] Showing ALL devices:', filteredDevices.length);
             } else {
                 // FALLBACK: Se mode não for reconhecido, excluir apenas Coordinator
                 that.debug.warn('|     [buildDeviceIdInput] Unknown mode:', that.config.mode, '- filtering Coordinator');
-                filteredDevices = devices.filter(device => {
-                    return device.type !== 'Coordinator';
-                });
+                filteredDevices = Zigbee2MqttEditorUtils.filterDevicesByMode(devices, that.config.mode);
             }
             
             // Adicionar os devices filtrados
@@ -953,8 +953,10 @@ class Zigbee2MqttEditor {
                             // label by property, not name: multi-gang devices expose several
                             // features all named "state" (state_l1, state_l2, ...)
                             $('<option/>', {
-                                value: expose.property,
-                                text: expose.property || expose.name
+                                value: expose.property,   // ← o valor guardado no nó NÃO muda
+                                // style:'property' reproduz o aspeto antigo; 'auto' mostra "Descrição (property)"
+                                text: Zigbee2MqttEditorUtils.formatExposeLabel(expose, { style: 'auto', includeUnit: false })
+                                      || expose.property || expose.name
                             }).appendTo($commandList);
                             commandsCount++;
                         }
@@ -1262,17 +1264,8 @@ class Zigbee2MqttEditor {
             // Prefer the values the device itself declares for this property (binary
             // on/off/toggle, or enum values such as OPEN/CLOSE/STOP for covers or
             // LOCK/UNLOCK for locks); only fall back to the generic lists below if it doesn't.
-            const findExposeByProperty = (exposes) => {
-                for (let expose of exposes || []) {
-                    if (expose.property === currentCommand) return expose;
-                    if (expose.features) {
-                        const found = findExposeByProperty(expose.features);
-                        if (found) return found;
-                    }
-                }
-                return null;
-            };
-            const deviceExpose = findExposeByProperty(device?.definition?.exposes);
+            const deviceExpose = Zigbee2MqttEditorUtils.findExposeByProperty(device?.definition?.exposes, currentCommand);
+						
             const deviceValues = [];
             if (deviceExpose && Array.isArray(deviceExpose.values) && deviceExpose.values.length) {
                 deviceExpose.values.forEach(value => deviceValues.push({ value: String(value), label: String(value).toUpperCase() }));
@@ -1303,18 +1296,7 @@ class Zigbee2MqttEditor {
                 z2mPayloadOptions = [...droplistFromConfig];
             } 
             else if (device?.definition?.exposes) {
-                const findExpose = (exposes) => {
-                    for (let expose of exposes) {
-                        if (expose.property === currentCommand) return expose;
-                        if (expose.features) {
-                            const found = findExpose(expose.features);
-                            if (found) return found;
-                        }
-                    }
-                    return null;
-                };
-
-                const foundExpose = findExpose(device.definition.exposes);
+                const foundExpose = Zigbee2MqttEditorUtils.findExposeByProperty(device.definition.exposes, currentCommand);
 
                 if (foundExpose) {
                     if (foundExpose.values && Array.isArray(foundExpose.values)) {
@@ -1714,8 +1696,7 @@ class Zigbee2MqttEditor {
             return true;
         }
         
-        const flatten = arr => arr.flatMap(e => e.features ? flatten(e.features) : [e]);
-        const exposes = flatten(device.definition.exposes);
+        const exposes = Zigbee2MqttEditorUtils.flattenExposes(device.definition.exposes);
         
         let pairValue = null;
         const pairCmd = isMin ? pairInfo.max : pairInfo.min;
@@ -1812,8 +1793,7 @@ class Zigbee2MqttEditor {
         
         const device = that.getDevice();
         if (device && device.definition && device.definition.exposes) {
-            const flatten = arr => arr.flatMap(e => e.features ? flatten(e.features) : [e]);
-            const exposes = flatten(device.definition.exposes);
+            const exposes = Zigbee2MqttEditorUtils.flattenExposes(device.definition.exposes);
             
             const expose = exposes.find(e => e.property === cmd);
             if (expose && 'value_min' in expose && 'value_max' in expose) {
@@ -1838,7 +1818,7 @@ class Zigbee2MqttEditor {
     hasSetAccess(access) {
         // Verificar se o bit SET (2) está ativo usando bitwise AND
         // Se (access & 2) > 0, então tem permissão de escrita
-        return (access & 2) > 0;
+        return Zigbee2MqttEditorUtils.hasSetAccess(access);
     }
     /**
      * Verifica se access permite PUBLISH (leitura) - bit 1
@@ -1848,7 +1828,7 @@ class Zigbee2MqttEditor {
     hasPublishAccess(access) {
         // Verificar se o bit PUBLISH (1) está ativo usando bitwise AND
         // Se (access & 1) > 0, então device publica dados (leitura)
-        return (access & 1) > 0;
+        return Zigbee2MqttEditorUtils.hasPublishAccess(access);
     }
     /**
      * Verifica se device SELECIONADO tem comandos (propriedades com SET)
@@ -1856,102 +1836,24 @@ class Zigbee2MqttEditor {
      */
     deviceHasCommands() {
         let that = this;
-        let device = that.getDevice();
         
         that.debug.log('🔵 [deviceHasCommands] Checking...');
         
-        if (!device) {
-            that.debug.log('⚠️ [deviceHasCommands] No device selected');
-            return false;
-        }
-        
-        if (!('definition' in device) || !device.definition) {
-            that.debug.log('⚠️ [deviceHasCommands] No device.definition');
-            return false;
-        }
-        
-        if (!('exposes' in device.definition)) {
-            that.debug.log('⚠️ [deviceHasCommands] No device.definition.exposes');
-            return false;
-        }
-        
-        const flatten = arr => arr.flatMap(e => e.features ? flatten(e.features) : [e]);
-        const exposes = flatten(device.definition.exposes);
-        
-        const hasWritableExposes = exposes.some(expose => {
-            // Verificar propriedade direta
-            if ('property' in expose && 'access' in expose) {
-                const canSet = that.hasSetAccess(expose.access);
-                if (canSet) {
-                    that.debug.log(`  ✅ [${expose.property}] access=${expose.access} → CAN SET`);
-                    return true;
-                } else {
-                    that.debug.log(`  ❌ [${expose.property}] access=${expose.access} → READ ONLY`);
-                }
-            }
-
-            if ('features' in expose && Array.isArray(expose.features)) {
-                return expose.features.some(feature => {
-                    if ('property' in feature && 'access' in feature) {
-                        const canSet = that.hasSetAccess(feature.access);
-                        if (canSet) {
-                            that.debug.log(`  ✅ [${feature.property}] access=${feature.access} → CAN SET`);
-                            return true;
-                        } else {
-                            that.debug.log(`  ❌ [${feature.property}] access=${feature.access} → READ ONLY`);
-                        }
-                    }
-                    return false;
-                });
-            }
-            
-            return false;
-        });
+        // verbose:true -> mantém os logs "No device selected / No device.definition /
+        // No device.definition.exposes" e os ❌ READ ONLY de cada expose
+        const hasWritableExposes = Zigbee2MqttEditorUtils.deviceHasCommands(that.getDevice(), { verbose: true });
         
         that.debug.log('✅ [deviceHasCommands] Result:', hasWritableExposes);
         return hasWritableExposes;
     }
-    /**
+	/**
      * Verifica se um device ESPECÍFICO tem comandos
      * @param {Object} device - Device a verificar
      * @returns {boolean}
      */
     deviceHasCommandsForDevice(device) {
-        if (!device || !('definition' in device) || !device.definition || !('exposes' in device.definition)) {
-            return false;
-        }
-        
-        const flatten = arr => arr.flatMap(e => e.features ? flatten(e.features) : [e]);
-        const exposes = flatten(device.definition.exposes);
-        
-        const hasWritableExposes = exposes.some(expose => {
-            // Verificar propriedade direta
-            if ('property' in expose && 'access' in expose) {
-                const canSet = this.hasSetAccess(expose.access);
-                if (canSet) {
-                    this.debug.log(`  ✅ [${device.friendly_name}][${expose.property}] access=${expose.access} → CAN SET`);
-                    return true;
-                }
-            }
-            
-            // Verificar features aninhadas
-            if ('features' in expose && Array.isArray(expose.features)) {
-                return expose.features.some(feature => {
-                    if ('property' in feature && 'access' in feature) {
-                        const canSet = this.hasSetAccess(feature.access);
-                        if (canSet) {
-                            this.debug.log(`❌ [${device.friendly_name}][${feature.property}] access=${feature.access} → CAN SET`);
-                            return true;
-                        }
-                    }
-                    return false;
-                });
-            }
-            
-            return false;
-        });
-        
-        return hasWritableExposes;
+        // (loga só os ✅ CAN SET, tal como antes)
+        return Zigbee2MqttEditorUtils.deviceHasCommands(device);
     }
     /**
      * Verifica se um device ESPECÍFICO tem exposes legíveis
@@ -1959,43 +1861,9 @@ class Zigbee2MqttEditor {
      * @returns {boolean}
      */
     deviceHasReadableExposesForDevice(device) {
-        if (!device || !('definition' in device) || !device.definition || !('exposes' in device.definition)) {
-            return false;
-        }
-        
-        const flatten = arr => arr.flatMap(e => e.features ? flatten(e.features) : [e]);
-        const exposes = flatten(device.definition.exposes);
-        
         // Verificar se existe pelo menos 1 expose com PUBLISH (bit 1)
-        const hasReadableExposes = exposes.some(expose => {
-            // Verificar propriedade direta
-            if ('property' in expose && 'access' in expose) {
-                const canPublish = this.hasPublishAccess(expose.access);
-                if (canPublish) {
-                    this.debug.log(`  ✅ [${device.friendly_name}][${expose.property}] access=${expose.access} → CAN PUBLISH`);
-                    return true;
-                }
-            }
-            
-            // Verificar features aninhadas
-            if ('features' in expose && Array.isArray(expose.features)) {
-                return expose.features.some(feature => {
-                    if ('property' in feature && 'access' in feature) {
-                        const canPublish = this.hasPublishAccess(feature.access);
-                        if (canPublish) {
-                            this.debug.log(`  ✅ [${device.friendly_name}][${feature.property}] access=${feature.access} → CAN PUBLISH`);
-                            return true;
-                        }
-                    }
-                    return false;
-                });
-            }
-            
-            return false;
-        });
-        
-        return hasReadableExposes;
-    }    
+        return Zigbee2MqttEditorUtils.deviceHasReadableExposes(device);
+    }  
     // ============================================================================
     // 🎨 DYNAMIC UI ENGINE - Sliders e Color Pickers (SUBSTITUI LOGICA ANTIGA)
     // ============================================================================
