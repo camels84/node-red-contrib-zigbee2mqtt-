@@ -390,7 +390,41 @@ module.exports = function(RED) {
             node.mqtt.publish(node.getTopic('/bridge/request/restart'));
             node.log('Restarting zigbee2mqtt...');
         }
+		
+		/**
+         * Normaliza e valida o nome de um grupo.
+         * - aceita string (ou número, convertido para string)
+         * - aplica trim()
+         * - rejeita: vazio, só barras ("/", "//"), caracteres de controlo
+         *
+         * @param {*} name
+         * @returns {string|null} nome limpo, ou null se inválido
+         */
+        normalizeGroupName(name) {
+            if (typeof name === 'number' && isFinite(name)) {
+                name = String(name);
+            }
+            if (typeof name !== 'string') {
+                return null;
+            }
 
+            const clean = name.trim();
+
+            if (clean === '') {
+                return null;
+            }
+            // só separadores de hierarquia, ex: "/" ou "//"
+            if (/^[\/\\]+$/.test(clean)) {
+                return null;
+            }
+            // caracteres de controlo (\u0000-\u001F, \u007F)
+            if (/[\u0000-\u001F\u007F]/.test(clean)) {
+                return null;
+            }
+
+            return clean;
+        }
+		
         setLogLevel(val) {
             let node = this;
             if (['info', 'debug', 'warning', 'error'].indexOf(val) < 0) val = 'info';
@@ -541,15 +575,23 @@ module.exports = function(RED) {
                 return {'error': true, 'description': 'no such group'};
             }
 
-            if (!newName.length) {
+            const cleanName = node.normalizeGroupName(newName);
+            if (!cleanName) {
+                node.warn('renameGroup aborted: new name is empty or invalid (received: ' + JSON.stringify(newName) + ')');
                 return {'error': true, 'description': 'can not be empty'};
             }
 
+            // Nada a fazer se o nome (já normalizado) é igual ao atual
+            if (cleanName === group.friendly_name) {
+                node.log('renameGroup skipped: name unchanged (' + cleanName + ')');
+                return {'success': true, 'description': 'name unchanged'};
+            }
+
             let payload = {
-                'from': group.friendly_name, 'to': newName,
+                'from': group.friendly_name, 'to': cleanName,
             };
             node.mqtt.publish(node.getTopic('/bridge/request/group/rename'), JSON.stringify(payload));
-            node.log('Rename group ' + id + ' to ' + newName);
+            node.log('Rename group ' + id + ' to ' + cleanName);
 
             return {'success': true, 'description': 'command sent'};
         }
@@ -573,11 +615,26 @@ module.exports = function(RED) {
 
         addGroup(name) {
             let node = this;
+
+            const cleanName = node.normalizeGroupName(name);
+            if (!cleanName) {
+                node.warn('addGroup aborted: group name is empty or invalid (received: ' + JSON.stringify(name) + ')');
+                // O bridge.html já faz alert(data.description) quando "error" in data
+                return {'error': true, 'description': 'group name can not be empty'};
+            }
+
+            // (acrescento meu, não pedido: evita TypeError se o MQTT estiver desligado;
+            //  podes apagar este bloco se preferires manter só a validação do nome)
+            if (!node.mqtt || !node.connection) {
+                node.warn('addGroup aborted: MQTT not connected');
+                return {'error': true, 'description': 'MQTT not connected'};
+            }
+
             let payload = {
-                'friendly_name': name,
+                'friendly_name': cleanName,
             };
             node.mqtt.publish(node.getTopic('/bridge/request/group/add'), JSON.stringify(payload));
-            node.log('Add group: ' + name);
+            node.log('Add group: ' + cleanName);
 
             return {'success': true, 'description': 'command sent'};
         }
