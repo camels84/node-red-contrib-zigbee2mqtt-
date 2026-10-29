@@ -1,4 +1,7 @@
 const Zigbee2mqttHelper = require('../resources/Zigbee2mqttHelper.js');
+// Node-RED system logger (4 levels); the level is the one chosen in the server config node
+// (mesmo padrão do bridge.js: segue o nível do nó servidor em tempo real, sem redeploy)
+const Z2MLogger = require('../resources/js/node-red-contrib-zigbee2mqtt-logger.js').Logger;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 📤 SAÍDA OPCIONAL "updated state" - constantes e funções de suporte
@@ -172,6 +175,26 @@ function deriveExpectedProps(toSend) {
     return Array.from(props);
 }
 
+/**
+ * v3.1.0 - Normalização do comando "color".
+ * O Z2M espera {"color": {...}}. Se o payload for um objeto sem a chave "color" (ex.: {x, y}),
+ * é embrulhado: { color: payload }. Aceita também um JSON em string (ex.: as opções da droplist
+ * do comando "color" são strings como '{"x":0.701,"y":0.299}').
+ * Idempotente: se já tiver a chave "color", devolve o objeto tal como está.
+ * Para qualquer outro comando (ou valor não-objeto) devolve o payload original (mesma referência).
+ */
+function normalizeColorPayload(command, payload) {
+    if (command !== 'color') return payload;
+
+    let value = payload;
+    if (typeof value === 'string' && Zigbee2mqttHelper.isJson(value)) {
+        try { value = JSON.parse(value); } catch (e) { return payload; }
+    }
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return payload;
+
+    return ('color' in value) ? value : { color: value };
+}
+
 module.exports = function(RED) {
     class Zigbee2mqttNodeOut {
         constructor(config) {
@@ -181,6 +204,11 @@ module.exports = function(RED) {
             node.config = config;
             node.cleanTimer = null;
             node.server = RED.nodes.getNode(node.config.server);
+            // Logger Node-RED: segue o nível do nó servidor selecionado (live, sem redeploy)
+            node.logger = Z2MLogger.create(node, {
+                prefix: 'Out',
+                getLevel: function () { return node.server ? node.server.debug_level : undefined; }
+            });
 
             // ── Saída opcional "updated state" ───────────────────────────────
             node.outputEnabled = (config.outputEnabled === true || config.outputEnabled === 'true');
@@ -296,7 +324,20 @@ module.exports = function(RED) {
                                 break;
 
                             case 'num': {
+                                // v3.1.0: números sempre via parseFloat() (já era assim na v3.3.8)
                                 payload = parseFloat(node.config.payload);
+                                // (robustez) NaN seria serializado como null por JSON.stringify e enviado ao device
+                                if (isNaN(payload)) {
+                                    node.logger.throttle('warn', 'num-nan', 30000,
+                                        'Payload of type "num" is not a valid number: ' + JSON.stringify(node.config.payload));
+                                    node.status({
+                                        fill: "red",
+                                        shape: "dot",
+                                        text: "@evilbunny/node-red-contrib-zigbee2mqtt/out:status.no_payload"
+                                    });
+                                    sendResult(false);
+                                    return;
+                                }
                                 break;
                             }
 
@@ -335,6 +376,18 @@ module.exports = function(RED) {
                             case 'msg':
                             default: {
                                 payload = message[node.config.payload];
+
+                                // v3.1.0: comando "color" + payload objeto sem a chave "color" -> { color: payload }
+                                // O comando só é resolvido no passo 2, por isso é calculado aqui antecipadamente
+                                // (commandType 'msg' lê o nome do comando da própria mensagem).
+                                const earlyCommand = (node.config.commandType === 'msg')
+                                    ? message[node.config.command]
+                                    : node.config.command;
+                                const colorNormalized = normalizeColorPayload(earlyCommand, payload);
+                                if (colorNormalized !== payload) {
+                                    node.logger.debug('Payload for command "color" wrapped as {"color": ...} (msg.' + node.config.payload + ')');
+                                    payload = colorNormalized;
+                                }
                                 break;
                             }
                         }
@@ -443,11 +496,35 @@ module.exports = function(RED) {
                                             payload = parseInt(payload);
                                             if (isNaN(payload)) { sendResult(false); return; }
                                             break;
+
+                                        // v3.1.0: tilt (inclinação de estores/venezianas, 0-100) -> sempre inteiro
+                                        case 'tilt': {
+                                            const rawTilt = payload;
+                                            payload = parseInt(payload);
+                                            if (isNaN(payload)) {
+                                                node.logger.throttle('warn', 'tilt-nan', 30000,
+                                                    'Invalid "tilt" value: ' + JSON.stringify(rawTilt));
+                                                sendResult(false);
+                                                return;
+                                            }
+                                            node.logger.debug('Command "tilt": ' + JSON.stringify(rawTilt) + ' -> ' + payload);
+                                            break;
+                                        }
                                         
-                                        case 'scene':
+                                        // v3.1.0: "scene" é um alias interno -> o Z2M só conhece "scene_recall" (payload inteiro)
+                                        case 'scene': {
+                                            const rawScene = payload;
                                             command = 'scene_recall';
                                             payload = parseInt(payload);
+                                            if (isNaN(payload)) {
+                                                node.logger.throttle('warn', 'scene-nan', 30000,
+                                                    'Invalid scene id: ' + JSON.stringify(rawScene));
+                                                sendResult(false);
+                                                return;
+                                            }
+                                            node.logger.debug('Command "scene" renamed to "scene_recall" (id ' + payload + ')');
                                             break;
+                                        }
 
                                         case 'lock':
                                             command = 'state';
@@ -464,7 +541,17 @@ module.exports = function(RED) {
                                             }
                                             break;
 
-                                        case 'color':
+                                        // v3.1.0: payload objeto (ou JSON em string) sem a chave "color" -> { color: payload }
+                                        //         (cobre também os payloads json / str / z2m_payload, não só msg)
+                                        case 'color': {
+                                            const colorFixed = normalizeColorPayload(command, payload);
+                                            if (colorFixed !== payload) {
+                                                node.logger.debug('Command "color": payload normalised to ' + JSON.stringify(colorFixed));
+                                                payload = colorFixed;
+                                            }
+                                            break;
+                                        }
+//                                            [ORIGINAL - desativado]
 //                                            payload = {"color": payload};
 //                                            break;
                                             
@@ -551,6 +638,14 @@ module.exports = function(RED) {
                             }
                         }
 
+                        // v3.1.0: diagnóstico do que foi resolvido (JSON.stringify só com o nível debug ativo)
+                        if (node.logger.isEnabled('debug')) {
+                            node.logger.debug('Resolved -> target="' + (target.friendly_name || key) + '"'
+                                + (target.endpoint ? ' endpoint=' + target.endpoint : '')
+                                + ' commandType=' + node.config.commandType + ' command=' + JSON.stringify(command)
+                                + ' payloadType=' + node.config.payloadType + ' payload=' + JSON.stringify(payload));
+                        }
+
                         // 3. PROCESSAR OPÇÕES
                         let optionsToSend = {};
                         switch (node.config.optionsType) {
@@ -609,6 +704,11 @@ module.exports = function(RED) {
                                 }
 
                                 const payloadStr = JSON.stringify(toSend);
+
+                                // v3.1.0: comando final + tópico MQTT onde vai ser publicado
+                                node.logger.debug('Publishing -> topic="' + topic + '" final command='
+                                    + ((command === null || command === undefined) ? '(none: payload sent as object)' : JSON.stringify(command))
+                                    + ' payload=' + payloadStr);
 
                                 if (RED.settings.verbose) {
                                     node.log('Published to mqtt topic: ' + topic + ' : ' + payloadStr);
