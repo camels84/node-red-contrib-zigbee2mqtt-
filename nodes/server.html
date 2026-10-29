@@ -25,6 +25,24 @@
         <label for="node-config-input-name" class="l-width"><i class="fa fa-bookmark"></i> <span data-i18n="label.name"></span></label>
         <input type="text" id="node-config-input-name">
     </div>
+    <!-- Flow Label / Icon: usados pelos nós in/out/get que usam este servidor -->
+    <div class="form-row">
+        <label for="node-config-input-flowLabel" class="l-width"><i class="fa fa-tag"></i> Flow Label</label>
+        <input type="text" id="node-config-input-flowLabel" placeholder="ex.: Sala">
+    </div>
+    <div class="form-row">
+        <label for="node-config-input-flowIcon" class="l-width"><i class="fa fa-picture-o"></i> Icon</label>
+        <select id="node-config-input-flowIcon" style="width:70%">
+            <option value="">(default)</option>
+            <option value="font-awesome/fa-lightbulb-o">lightbulb</option>
+            <option value="font-awesome/fa-home">home</option>
+            <option value="font-awesome/fa-bolt">bolt</option>
+            <option value="font-awesome/fa-thermometer-half">thermometer</option>
+            <option value="font-awesome/fa-plug">plug</option>
+            <option value="font-awesome/fa-wifi">wifi</option>
+            <option value="font-awesome/fa-microchip">microchip</option>
+        </select>
+    </div>
     <div class="form-row">
         <label for="node-config-input-host" class="l-width"><i class="fa fa-location-arrow"></i> <span data-i18n="label.host"></span></label>
         <input type="text" id="node-config-input-host">
@@ -115,6 +133,15 @@
                 value: 'notice',
                 required: false
             },
+            // Flow Label / Icon (font-awesome/fa-xxx) mostrados nos nós in/out/get deste servidor
+            flowLabel: {
+                value: '',
+                required: false
+            },
+            flowIcon: {
+                value: '',
+                required: false
+            },
             // Legacy plaintext login from older versions. There is no form input for
             // these any more; they're kept in defaults only so the editor doesn't drop
             // them before they've been migrated into credentials (see oneditprepare/oneditsave).
@@ -184,6 +211,15 @@
         oneditsave: function () {
             this.mqtt_username = null;
             this.mqtt_password = null;
+            // Reatividade: redesenhar os nós que usam este servidor para o label/ícone novos aparecerem já
+            var serverId = this.id;
+            setTimeout(function () {
+                RED.nodes.eachNode(function (n) {
+                    if (n.server === serverId) { n.dirty = true; n.changed = true; }
+                });
+                RED.nodes.dirty(true);
+                RED.view.redraw(true);
+            }, 0);
         }
     });
 </script>
