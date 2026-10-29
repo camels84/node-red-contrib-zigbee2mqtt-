@@ -17,6 +17,28 @@
 
 <link rel="stylesheet" href="resources/@evilbunny/node-red-contrib-zigbee2mqtt/css/common.css" type="text/css" />
 <link rel="stylesheet" href="resources/@evilbunny/node-red-contrib-zigbee2mqtt/css/bridge.css" type="text/css" />
+<style>
+    /* Log Node Red: botoes de nivel (mesmo aspeto dos botoes "Log Zigbee2Mqtt") */
+    .z2m-nr-level-group { display: inline-flex; gap: 4px; width: 70%; vertical-align: middle; }
+    .z2m-nr-level-btn, .log-level-btn { flex: 1 1 0; min-width: 0; text-align: center; cursor: pointer; padding: 6px 4px; }
+    .z2m-nr-level-btn[disabled], .log-level-btn[disabled] { opacity: .5; cursor: not-allowed; }
+    .red-ui-button.z2m-nr-level-btn.active, .red-ui-button.log-level-btn.active { color: #fff; font-weight: bold; }
+    .red-ui-button.z2m-nr-level-btn.active.z2m-lvl-error, .red-ui-button.log-level-btn.active.z2m-lvl-error  { background: #c62828; border-color: #c62828; }
+    .red-ui-button.z2m-nr-level-btn.active.z2m-lvl-warn, .red-ui-button.log-level-btn.active.z2m-lvl-warn   { background: #ef6c00; border-color: #ef6c00; }
+    .red-ui-button.z2m-nr-level-btn.active.z2m-lvl-notice, .red-ui-button.log-level-btn.active.z2m-lvl-notice { background: #2e7d32; border-color: #2e7d32; }
+    .red-ui-button.z2m-nr-level-btn.active.z2m-lvl-debug, .red-ui-button.log-level-btn.active.z2m-lvl-debug  { background: #1565c0; border-color: #1565c0; }
+    /* Botoes desactivados (sem servidor / offline) nao aceitam cliques */
+    .bridge-tabs ~ .tab-content .red-ui-button.disabled { pointer-events: none; opacity: .55; cursor: not-allowed; }
+    /* Separador Status: nome do coordenador a negrito */
+    #status-coordinator { font-weight: bold; }
+    #status-coordinator span { font-weight: normal; }
+    /* badge do nivel no separador Status */
+    .z2m-lvl-badge { padding: 0 8px; border-radius: 3px; color: #fff; font-weight: bold; }
+    .z2m-lvl-badge.z2m-lvl-error  { background: #c62828; }
+    .z2m-lvl-badge.z2m-lvl-warn   { background: #ef6c00; }
+    .z2m-lvl-badge.z2m-lvl-notice { background: #2e7d32; }
+    .z2m-lvl-badge.z2m-lvl-debug  { background: #1565c0; }
+</style>
 <link rel="stylesheet" href="resources/@evilbunny/node-red-contrib-zigbee2mqtt/tokeninput/token-input-facebook.css" type="text/css" />
 
 <script type='text/javascript'>
@@ -98,20 +120,14 @@
         
         <div class="form-row">
             <label for="log-level" class="l-width">
-                <i class="fa fa-commenting-o"></i> <span data-i18n="label.log_level"></span>
+                <i class="fa fa-commenting-o"></i> <span><!-- was: data-i18n="label.log_level" -->Log Zigbee2Mqtt</span>
             </label>
-            <button style="width: 17%" class="red-ui-button log-level-btn" data-level="info" id="log-level-info-btn" type="button">
-                <span data-i18n="label.log_level_info"></span>
-            </button>
-            <button style="width: 17%" class="red-ui-button log-level-btn" data-level="debug" id="log-level-debug-btn" type="button">
-                <span data-i18n="label.log_level_debug"></span>
-            </button>
-            <button style="width: 17%" class="red-ui-button log-level-btn" data-level="warning" id="log-level-warning-btn" type="button">
-                <span data-i18n="label.log_level_warning"></span>
-            </button>
-            <button style="width: 17%" class="red-ui-button log-level-btn" data-level="error" id="log-level-error-btn" type="button">
-                <span data-i18n="label.log_level_error"></span>
-            </button>
+            <div class="z2m-nr-level-group">
+                <button class="red-ui-button log-level-btn z2m-lvl-error"  data-level="error"   id="log-level-error-btn"   type="button"><span data-i18n="label.log_level_error"></span></button>
+                <button class="red-ui-button log-level-btn z2m-lvl-warn"   data-level="warning" id="log-level-warning-btn" type="button"><span data-i18n="label.log_level_warning"></span></button>
+                <button class="red-ui-button log-level-btn z2m-lvl-notice" data-level="info"    id="log-level-info-btn"    type="button"><span data-i18n="label.log_level_info"></span></button>
+                <button class="red-ui-button log-level-btn z2m-lvl-debug"  data-level="debug"   id="log-level-debug-btn"   type="button"><span data-i18n="label.log_level_debug"></span></button>
+            </div>
         </div>
         
         <div class="form-row">
@@ -122,6 +138,23 @@
                 <span data-i18n="label.restart_zigbee2mqtt"></span>
             </button>
         </div>
+
+        <!-- Log Node Red: verbosidade do log de sistema do lado Node-RED (independente do "Log Zigbee2Mqtt").
+             Aplicado de imediato ao servidor em execucao e guardado no config node do servidor (persiste no Deploy).
+             O input hidden mantem o valor (#node-input-debug_level) para o resto do codigo. -->
+        <div class="form-row">
+            <label class="l-width">
+                <i class="fa fa-file-text-o"></i> <span>Log Node Red</span>
+            </label>
+            <input type="hidden" id="node-input-debug_level" value="notice">
+            <div class="z2m-nr-level-group">
+            <button type="button" class="red-ui-button z2m-nr-level-btn z2m-lvl-error"  data-level="error">Error</button>
+            <button type="button" class="red-ui-button z2m-nr-level-btn z2m-lvl-warn"   data-level="warn">Warning</button>
+            <button type="button" class="red-ui-button z2m-nr-level-btn z2m-lvl-notice" data-level="notice">Notice</button>
+            <button type="button" class="red-ui-button z2m-nr-level-btn z2m-lvl-debug"  data-level="debug">Debug</button>
+        </div>
+        </div>
+        <div class="form-tips" id="debug-level-hint" style="margin-top:-4px;"></div>
     </div>
 
     <div class="tab-content" id="content-status">
@@ -152,8 +185,11 @@
             <div class="status-label">Restart Required:</div>
             <div class="status-value" id="status-restart-required">Loading...</div>
             
-            <div class="status-label">Log Level:</div>
+            <div class="status-label">Log Zigbee2Mqtt:</div>
             <div class="status-value" id="status-log-level">Loading...</div>
+
+            <div class="status-label">Log Node Red:</div>
+            <div class="status-value" id="status-debug-level">Loading...</div>
             
             <div class="status-label">Devices Count:</div>
             <div class="status-value" id="status-devices-count">Loading...</div>
@@ -312,7 +348,8 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
                         errorComponent: data.errorComponent || null,
                         mqtt: data.mqtt || null,
                         zigbee2mqtt: data.zigbee2mqtt || null,
-                        stats: data.stats || null
+                        stats: data.stats || null,
+                        node_red: data.node_red || null
                     };
                     
                     debug.log('📊 Server state:', newState.state);
@@ -354,9 +391,12 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
             stateCheckInterval = setInterval(function() {
                 // ✅ Detectar estado atual
                 detectServerState(currentServer, function(newState) {
+                    if ($('#node-input-server').val() !== currentServer) return; // servidor mudou entretanto
                     // ✅ Comparar estado
                     const stateChanged = newState.state !== serverState.state;
                     const errorChanged = newState.errorComponent !== serverState.errorComponent;
+                    syncDebugLevelFromState(newState);
+                    syncZ2mLogLevelFromState(newState); // Logger Node-RED: follow changes made elsewhere
                     
                     if (stateChanged || errorChanged) {
                         debug.log('🔄 State changed:', serverState.state, '→', newState.state);
@@ -366,6 +406,7 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
                         
                         // ✅ Atualizar estado global
                         serverState = newState;
+                        if (newState.state === 'online') loadBridgeConfig(currentServer);
                         
                         // ✅ Atualizar UI
                         updateUIState();
@@ -393,6 +434,9 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
             const currentServer = $('#node-input-server').val();
             const hasServer = currentServer && currentServer !== '_ADD_' && currentServer !== '';
             
+            // Logger Node-RED is a Node-RED-side setting: it must stay usable even when MQTT or
+            // Zigbee2MQTT are offline (that is exactly when you want more verbosity); it only needs a server node.
+            $('.z2m-nr-level-btn').prop('disabled', false); // Log Node Red nunca e bloqueado (nem sem servidor, nem offline)
             // CASO 1: Sem servidor configurado
             if (!hasServer) {
                 $('#server-connection-status')
@@ -554,6 +598,48 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
         // ═══════════════════════════════════════════════════════
         // FUNÇÃO: Habilitar/Desabilitar controles
         // ═══════════════════════════════════════════════════════
+        // Log Zigbee2Mqtt: nivel (zigbee2mqtt) -> classe de cor (mesmas cores do Log Node Red)
+        const Z2M_LOG_CLASS = { error: 'error', warning: 'warn', info: 'notice', debug: 'debug' };
+
+        function z2mLogBadge(level) {
+            const cls = Z2M_LOG_CLASS[level];
+            const txt = $('<span>').text(level || '–').html();
+            return cls ? '<span class="z2m-lvl-badge z2m-lvl-' + cls + '">' + txt + '</span>' : txt;
+        }
+
+        // Marca o botao do nivel actual do Zigbee2MQTT (so repinta quando o valor muda)
+        function syncZ2mLogLevelFromState(st, force) {
+            const lvl = st && st.zigbee2mqtt && st.zigbee2mqtt.log_level;
+            if (!lvl || !Z2M_LOG_CLASS[lvl]) return;
+            if (!force && node._lastZ2mLogLevel === lvl) return;
+            node._lastZ2mLogLevel = lvl;
+            $('.log-level-btn').removeClass('active');
+            $('#log-level-' + lvl + '-btn').addClass('active');
+        }
+
+        // Servidor seleccionado e valido? ("none" no select de config nodes = '_ADD_')
+        function hasValidServer() {
+            const s = $('#node-input-server').val();
+            return !!s && s !== '_ADD_';
+        }
+
+        // Guarda central de TODAS as accoes que falam com o servidor:
+        //  1) botao desactivado (<a> nao respeita "disabled" sozinho) -> ignora em silencio
+        //  2) sem servidor seleccionado -> avisa
+        //  3) servidor offline -> avisa
+        function canAct(el, msg) {
+            if (el && $(el).hasClass('disabled')) return false;
+            if (!hasValidServer()) {
+                RED.notify('Select a server first', 'warning');
+                return false;
+            }
+            if (serverState.state !== 'online') {
+                RED.notify(msg || RED._("@evilbunny/node-red-contrib-zigbee2mqtt/bridge:notifications.server_offline"), 'warning');
+                return false;
+            }
+            return true;
+        }
+
         function setControlsEnabled(enabled) {
             if (enabled) {
                 $('#refresh-all').removeClass('disabled');
@@ -606,7 +692,7 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
                 '<span style="color: #999;">⚠ ' + RED._("@evilbunny/node-red-contrib-zigbee2mqtt/bridge:status.no_server_configured") + '</span>'
             );
             
-            $('#status-coordinator, #status-advanced-output, #status-legacy-api, #status-mqtt-retain, #status-permit-join, #status-restart-required, #status-log-level, #status-devices-count, #status-groups-count').text('–');
+            $('#status-coordinator, #status-advanced-output, #status-legacy-api, #status-mqtt-retain, #status-permit-join, #status-restart-required, #status-log-level, #status-devices-count, #status-groups-count, #status-debug-level').text('–');
             
             $('#map-display').html(
                 '<i class="fa fa-sitemap" style="font-size: 48px; color: #ccc;"></i>' +
@@ -634,10 +720,31 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
         // ═══════════════════════════════════════════════════════
         // FUNÇÃO INIT - CHAMADA UMA ÚNICA VEZ
         // ═══════════════════════════════════════════════════════
+        function loadBridgeConfig(serverId) {
+            $.getJSON('zigbee2mqtt-eb/getConfig', {
+                controllerID: serverId,
+                permit_join: true
+            }).done(function(data) {
+                if (data && data.log_level && Z2M_LOG_CLASS[data.log_level]) {
+                    node._lastZ2mLogLevel = data.log_level;
+                    $('.log-level-btn').removeClass('active');
+                    $('#log-level-' + data.log_level + '-btn').addClass('active');
+                }
+                if (data && data.permit_join) {
+                    $('#permit-join-start').hide();
+                    $('#permit-join-stop').show();
+                } else {
+                    $('#permit-join-start').show();
+                    $('#permit-join-stop').hide();
+                }
+            });
+        }
+
         function init() {
             const currentServer = $('#node-input-server').val();
             
             debug.log('🚀 init() called with server:', currentServer);
+            loadDebugLevelFromEditor(currentServer); // Logger Node-RED: start from the editor copy of the server node
 
             if (!currentServer || currentServer === '_ADD_' || currentServer === '') {
                 debug.warn('⚠️ No valid server');
@@ -654,7 +761,10 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
             // ✅ Detectar estado inicial
             detectServerState(currentServer, function(state) {
                 serverState = state;
+                syncDebugLevelFromState(state, true); // Logger Node-RED: reflect the running server
                 debug.log('📡 Initial server state:', serverState.state);
+                syncZ2mLogLevelFromState(state, true);                  // Log Zigbee2Mqtt: nivel actual (tambem em cache/offline)
+                if (serverState.state === 'online') loadBridgeConfig(currentServer);
                 
                 // ✅ Carregar dados
                 $.getJSON('zigbee2mqtt-eb/getDevices', {
@@ -678,27 +788,97 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
                 });
             });
             
-            // ✅ Carregar config se online
-            if (serverState.state === 'online') {
-                $.getJSON('zigbee2mqtt-eb/getConfig', {
-                    controllerID: currentServer,
-                    permit_join: true
-                }).done(function(data) {
-                    if (data && data.log_level) {
-                        $('.log-level-btn').removeClass('active');
-                        $(`#log-level-${data.log_level}-btn`).addClass('active');
-                    }
-                    
-                    if (data && data.permit_join) {
-                        $('#permit-join-start').hide();
-                        $('#permit-join-stop').show();
-                    } else {
-                        $('#permit-join-start').show();
-                        $('#permit-join-stop').hide();
-                    }
-                });
+        }
+        // ═══════════════════════════════════════════════════════
+        // LOGGER NODE-RED (select #node-input-debug_level)
+        // Independent of "Log Zigbee2Mqtt" (that one is the log level of zigbee2mqtt itself).
+        // ═══════════════════════════════════════════════════════
+        const DEBUG_LEVEL_HINTS = {
+            error:  'Only failures (connectivity / system errors).',
+            warn:   'Errors + warnings.',
+            notice: 'Errors + warnings + normal system events (default).',
+            debug:  'Everything, including diagnostic detail.'
+        };
+
+        // Highlight of the selected level (select border + hint + badge in the Status tab)
+        function paintDebugLevel(level) {
+            const $btns = $('.z2m-nr-level-btn');
+            $btns.removeClass('active');
+            if (DEBUG_LEVEL_HINTS[level]) {
+                $btns.filter('[data-level="' + level + '"]').addClass('active');
+                $('#debug-level-hint').text(DEBUG_LEVEL_HINTS[level]);
+                $('#status-debug-level').html('<span class="z2m-lvl-badge z2m-lvl-' + level + '">' + level + '</span>');
+            } else {
+                $('#debug-level-hint').text('');
+                $('#status-debug-level').text('–');
             }
-        }      
+        }
+
+        // Sets the select programmatically (does not fire the change handler below)
+        function setDebugLevelSelect(level) {
+            if (!DEBUG_LEVEL_HINTS[level]) return;
+            $('#node-input-debug_level').val(level);
+            paintDebugLevel(level);
+        }
+
+        // Editor copy of the server config node (what will be saved on the next Deploy)
+        function loadDebugLevelFromEditor(serverId) {
+            const srv = (serverId && serverId !== '_ADD_') ? RED.nodes.node(serverId) : null;
+            setDebugLevelSelect((srv && srv.debug_level) || 'notice');
+        }
+
+        // State of the RUNNING server (from zigbee2mqtt-eb/serverState). Only applied when the runtime
+        // value actually changed, so a choice made in the editor but not deployed yet is not reverted
+        // by the 2s monitoring loop.
+        function syncDebugLevelFromState(st, force) {
+            const lvl = st && st.node_red && st.node_red.debug_level;
+            if (!lvl || !DEBUG_LEVEL_HINTS[lvl]) return;
+            if (!force && node._lastRuntimeDebugLevel === lvl) return;
+            node._lastRuntimeDebugLevel = lvl;
+            const sel = $('#node-input-debug_level')[0];
+            if (sel && document.activeElement === sel) return; // don't fight the user while choosing
+            setDebugLevelSelect(lvl);
+        }
+
+        $('#node-input-debug_level').off('change.z2mlog').on('change.z2mlog', function() {
+            const level = $(this).val();
+            const currentServer = $('#node-input-server').val();
+            paintDebugLevel(level);
+            if (!currentServer || currentServer === '_ADD_' || currentServer === '') return;
+
+            // 1) editor copy of the server config node -> persisted on the next Deploy
+            try {
+                const srv = RED.nodes.node(currentServer);
+                if (srv && srv.debug_level !== level) {
+                    srv.debug_level = level;
+                    srv.changed = true;
+                    srv.dirty = true;
+                    RED.nodes.dirty(true);
+                }
+            } catch (e) {
+                debug.warn('⚠️ Could not update the editor copy of the server node:', e.message);
+            }
+
+            // 2) running server -> applied immediately, no redeploy
+            $.getJSON('zigbee2mqtt-eb/setDebugLevel', {
+                controllerID: currentServer,
+                level: level
+            }).done(function() {
+                node._lastRuntimeDebugLevel = level;
+                RED.notify('Logger Node-RED: ' + level, 'success');
+            }).fail(function() {
+                RED.notify('Logger Node-RED: ' + level + ' - saved in the editor only (server not running yet). Deploy to apply.', 'warning');
+            });
+        });
+
+        // Botoes "Log Node Red": escrevem o nivel no input hidden e disparam o handler 'change.z2mlog' acima
+        $('.z2m-nr-level-btn').off('click.z2mlog').on('click.z2mlog', function() {
+            if ($(this).prop('disabled')) return;
+            $('#node-input-debug_level').val($(this).data('level')).trigger('change');
+        });
+
+        paintDebugLevel($('#node-input-debug_level').val() || 'notice');
+
         // ═══════════════════════════════════════════════════════
         // EVENT HANDLERS - Setup inicial
         // ═══════════════════════════════════════════════════════
@@ -721,7 +901,12 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
             if (node._lastServer === val) return; // Impedir init duplo no arranque
             node._lastServer = val;
             debug.log('🔄 Server changed to:', val);
+            // o intervalo antigo continuava a consultar o servidor anterior e repunha
+            // serverState = 'online' mesmo com "none" seleccionado -> parar sempre
+            stopStateMonitoring();
+            node._lastRuntimeDebugLevel = undefined;
             init();
+            if (hasValidServer()) startStateMonitoring();
         });
         // Delegar evento de clique para pastas (Suporte a Sub-níveis)
         $('#devices-table').on('click', '.z2m-group-header-row', function() {
@@ -760,10 +945,7 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
         // Refresh All
         $('#refresh-all').off('click').on('click', function() {
             // ✅ CORRIGIDO: Usar serverState.state
-            if (serverState.state !== 'online') {
-                RED.notify('Cannot refresh: server is offline', 'warning');
-                return;
-            }
+            if (!canAct(this, 'Cannot refresh: server is offline')) return;
             debug.log('🔄 Refresh all clicked');
             init();
         });
@@ -792,15 +974,12 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
         // ═══════════════════════════════════════════════════════
         // PERMIT JOIN START
         $('#permit-join-start').off('click').on('click', function() {
-            if (serverState.state !== 'online') {
-                RED.notify(RED._("@evilbunny/node-red-contrib-zigbee2mqtt/bridge:notifications.server_offline"), 'warning');
-                return;
-            }
+            if (!canAct(this)) return;
             
             const currentServer = $('#node-input-server').val();
             const time = parseInt($('#node-input-permitjoin-time').val()) || 180;
             
-            clearTimeout(permitJoinTimeout);
+            clearTimeout(node._permitJoinTimeout);
             
             $('#permit-join-start').hide();
             $('#permit-join-stop').show();
@@ -816,7 +995,7 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
                     'success'
                 );
                 
-                permitJoinTimeout = setTimeout(function() {
+                node._permitJoinTimeout = setTimeout(function() {
                     $('#permit-join-start').show();
                     $('#permit-join-stop').hide();
                 }, time * 1000);
@@ -830,14 +1009,11 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
 
         // PERMIT JOIN STOP
         $('#permit-join-stop').off('click').on('click', function() {
-            if (serverState.state !== 'online') {
-                RED.notify(RED._("@evilbunny/node-red-contrib-zigbee2mqtt/bridge:notifications.server_offline"), 'warning');
-                return;
-            }
+            if (!canAct(this)) return;
             
             const currentServer = $('#node-input-server').val();
             
-            clearTimeout(permitJoinTimeout);
+            clearTimeout(node._permitJoinTimeout);
             
             $('#permit-join-start').show();
             $('#permit-join-stop').hide();
@@ -855,10 +1031,7 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
         // LOG LEVEL
         // ═══════════════════════════════════════════════════════
         $('.log-level-btn').off('click').on('click', function() {
-            if (serverState.state !== 'online') {
-                RED.notify(RED._("@evilbunny/node-red-contrib-zigbee2mqtt/bridge:notifications.server_offline"), 'warning');
-                return;
-            }
+            if (!canAct(this)) return;
             
             const currentServer = $('#node-input-server').val();
             const level = $(this).data('level');
@@ -884,17 +1057,13 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
         // RESTART BRIDGE
         // ═══════════════════════════════════════════════════════
         $('#restart-bridge').off('click').on('click', function() {
-            if (serverState.state !== 'online') {
-                RED.notify(RED._("@evilbunny/node-red-contrib-zigbee2mqtt/bridge:notifications.server_offline"), 'warning');
-                return;
-            }
+            if (!canAct(this)) return;
             
             const currentServer = $('#node-input-server').val();
             
             if (confirm(RED._("@evilbunny/node-red-contrib-zigbee2mqtt/bridge:label.sure_restart"))) {
-                $.getJSON('zigbee2mqtt-eb/restart', {
-                    controllerID: currentServer
-                }).done(function(data) {
+                // was: $.getJSON('zigbee2mqtt-eb/restart', {...}) -> GET, but the route is POST (api.js) = always 404
+                $.ajax({ url: 'zigbee2mqtt-eb/restart', type: 'POST', contentType: 'application/json', dataType: 'json', data: JSON.stringify({ controllerID: currentServer }) }).done(function(data) {
                     RED.notify(RED._("@evilbunny/node-red-contrib-zigbee2mqtt/bridge:notifications.restart_requested"), 'success');
                 }).fail(function() {
                     RED.notify(RED._("@evilbunny/node-red-contrib-zigbee2mqtt/bridge:notifications.failed_restart"), 'error');
@@ -911,6 +1080,7 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
             
             $('#status-devices-count').text(devicesData.length);
             $('#status-groups-count').text(groupsData.length);
+            paintDebugLevel($('#node-input-debug_level').val()); // Logger Node-RED badge
             
             const isCached = serverState.state !== 'online';
             
@@ -935,7 +1105,7 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
                 
                 const logLevel = serverState.zigbee2mqtt?.log_level || 'Unknown';
                 $('#status-log-level').html(
-                    logLevel + ' <span style="color: #e65100; font-size: 11px;">(cached)</span>'
+                    z2mLogBadge(logLevel) + ' <span style="color: #e65100; font-size: 11px;">(cached)</span>'
                 );
                 return;
             }
@@ -978,7 +1148,7 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
                     '<span class="status-ok">✘ ' + RED._("@evilbunny/node-red-contrib-zigbee2mqtt/bridge:label.not_required") + '</span>'
                 );
                 
-                $('#status-log-level').text(data.log_level || 'info');
+                $('#status-log-level').html(z2mLogBadge(data.log_level || 'info'));
             }).fail(function() {
                 if (serverState.zigbee2mqtt && serverState.zigbee2mqtt.coordinator) {
                     const coord = serverState.zigbee2mqtt.coordinator;
@@ -1542,10 +1712,7 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
         $('#add-group-btn').off('click').on('click', function(e) {
             e.preventDefault();
             
-            if (serverState.state !== 'online') {
-                RED.notify(RED._("@evilbunny/node-red-contrib-zigbee2mqtt/bridge:notifications.server_offline"), 'warning');
-                return;
-            }
+            if (!canAct(this)) return;
             
             const currentServer = $('#node-input-server').val();
             const name = prompt(RED._("@evilbunny/node-red-contrib-zigbee2mqtt/bridge:groups.enter_group_name"), "");
@@ -1576,10 +1743,7 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
         $('#refresh-map-btn').off('click').on('click', function(e) {
             e.preventDefault();
             
-            if (serverState.state !== 'online') {
-                RED.notify(RED._("@evilbunny/node-red-contrib-zigbee2mqtt/bridge:notifications.server_offline"), 'warning');
-                return;
-            }
+            if (!canAct(this)) return;
             
             const currentServer = $('#node-input-server').val();
             const $btn = $(this);
@@ -1719,6 +1883,10 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
         const d = (typeof Z2MDebug !== 'undefined') ? Z2MDebug.create('Z2M Bridge') : console;
  
         node.permitjoin_time = parseInt($('#node-input-permitjoin-time').val()) || 180;
+        if (node._permitJoinTimeout) {
+            clearTimeout(node._permitJoinTimeout);
+            node._permitJoinTimeout = null;
+        }
         
         if (node._z2m_stateCheckInterval) {
             if (d && d.log) d.log('🛑 Cleanup: Stopping monitoring on SAVE');
