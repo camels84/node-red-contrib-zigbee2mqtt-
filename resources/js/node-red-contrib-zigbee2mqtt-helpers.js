@@ -61,6 +61,8 @@ class Zigbee2MqttEditor {
         this.property = node.state||null;
         this.optionsValue = node.optionsValue||null;
         this.optionsType = node.optionsType||null;
+        // v3.1.0: propriedades escolhidas para o filtro granular do nó "in" (array ou null)
+        this.filterProperties = this.normalizeFilterProperties(node.filterProperties);
         this.refresh = false;
         this.initializing = false;
  
@@ -105,6 +107,7 @@ class Zigbee2MqttEditor {
             that.debug.log('|->   🔵 Phase 2: buildDevicePropertyInput & buildDeviceOptionsInput');
             await that.buildDevicePropertyInput();
             await that.buildDeviceOptionsInput();
+            await that.buildFilterPropertiesInput(); // v3.1.0 (no-op nos nós sem #node-input-filterProperties)
             that.debug.log('|->   ✅ Phase 2: COMPLETE');
             
             // ====================================================================
@@ -390,6 +393,7 @@ class Zigbee2MqttEditor {
                 }
             } else {
                 that.setFriendlyName();
+                that.buildFilterPropertiesInput(); // v3.1.0: a lista de propriedades depende dos devices escolhidos
             }
             
             that.debug.log('');
@@ -835,6 +839,131 @@ class Zigbee2MqttEditor {
 
         that.debug.log('╔═══════════════════════════════════════════════════════════╗');
         that.debug.log('║ 🗿️ [buildDevicePropertyInput] COMPLETE                     ║');
+        that.debug.log('╚═══════════════════════════════════════════════════════════╝');
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 🔎 FILTER PROPERTIES (v3.1.0) - seletor múltiplo das chaves do JSON a monitorizar
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Converte o valor guardado no nó (string legada, array, null) num array limpo e sem duplicados.
+     *   null / undefined / '' / '0' -> []
+     *   'temperature'               -> ['temperature']
+     *   ['a', ' b ', '', 'a']       -> ['a', 'b']
+     * @param {string|Array|null} value
+     * @returns {Array<string>}
+     */
+    normalizeFilterProperties(value) {
+        if (typeof value === 'string') {
+            value = (value && value !== '0') ? [value] : [];
+        }
+        if (!Array.isArray(value)) {
+            return [];
+        }
+        const clean = [];
+        value.forEach(function (prop) {
+            if (typeof prop !== 'string') return;
+            const trimmed = prop.trim();
+            if (trimmed && clean.indexOf(trimmed) < 0) clean.push(trimmed);
+        });
+        return clean;
+    }
+
+    /**
+     * Devolve os devices atualmente selecionados (1 no modo simples, N no modo múltiplo).
+     * @returns {Array<Object>}
+     */
+    getSelectedDevicesForFilter() {
+        let that = this;
+        const list = (that.devices && Array.isArray(that.devices[0])) ? that.devices[0] : [];
+        if (!list.length || !that.device_id) return [];
+        const ids = Array.isArray(that.device_id) ? that.device_id : [that.device_id];
+        return list.filter(function (item) { return ids.indexOf(item.ieee_address) >= 0; });
+    }
+
+    /**
+     * Constrói o <select multiple id="node-input-filterProperties">.
+     * Opções = propriedades legíveis (PUBLISH) dos devices escolhidos + last_seen / linkquality.
+     * Sem seleção = sem filtro granular (compara o payload completo, como antes).
+     * @returns {Promise<void>}
+     */
+    async buildFilterPropertiesInput() {
+        let that = this;
+        const $filter = $('#node-input-filterProperties');
+        if (!$filter.length) return; // só existe no nó "in"
+
+        that.debug.log('╔═══════════════════════════════════════════════════════════╗');
+        that.debug.log('║ 🔎 [buildFilterPropertiesInput] STARTING                  ║');
+        that.debug.log('╚═══════════════════════════════════════════════════════════╝');
+
+        // o que estava escolhido (UI atual > valor guardado no nó) - sobrevive a rebuilds/mudança de device
+        let wanted = [];
+        try {
+            if ($filter.data('multipleSelect')) {
+                wanted = $filter.multipleSelect('getSelects', 'value');
+            }
+        } catch (e) { wanted = []; }
+        if (!wanted.length) wanted = that.normalizeFilterProperties(that.filterProperties);
+
+        $filter.children().remove();
+        $filter.multipleSelect('destroy').multipleSelect({
+            numberDisplayed: 1,
+            dropWidth: 320,
+            width: 320,
+            filter: true,
+            single: false, // sempre múltiplo; nenhuma seleção = payload completo
+            placeholder: RED._("@evilbunny/node-red-contrib-zigbee2mqtt/in:multiselect.all_properties")
+        }).multipleSelect('disable');
+
+        const seen = {};
+        const addOption = function ($group, value, label) {
+            if (seen[value]) return;
+            seen[value] = true;
+            $('<option/>', { value: value, text: label }).appendTo($group);
+        };
+
+        const devices = that.getSelectedDevicesForFilter();
+        if (devices.length) {
+            const $exposed = $('<optgroup/>', { label: RED._("@evilbunny/node-red-contrib-zigbee2mqtt/server:editor.zigbee2mqtt") });
+            $exposed.appendTo($filter);
+            devices.forEach(function (device) {
+                Zigbee2MqttEditorUtils.getReadableExposes(device).forEach(function (expose) {
+                    addOption($exposed, expose.property,
+                        Zigbee2MqttEditorUtils.formatExposeLabel(expose, { style: 'auto', includeUnit: true }) || expose.property);
+                });
+            });
+
+            // atributos comuns que o z2m acrescenta à maioria dos devices
+            const $common = $('<optgroup/>', { label: RED._("@evilbunny/node-red-contrib-zigbee2mqtt/server:editor.common") });
+            $common.appendTo($filter);
+            addOption($common, 'last_seen', 'last_seen');
+            addOption($common, 'linkquality', 'linkquality, lqi');
+        }
+
+        // manter também escolhas guardadas que já não existem nas opções (ex.: device offline/ainda sem definition),
+        // para o oneditsave não as perder sem o utilizador perceber
+        wanted.forEach(function (value) {
+            if (!seen[value]) {
+                let $orphans = $filter.find('optgroup.z2m-filter-orphans');
+                if (!$orphans.length) {
+                    $orphans = $('<optgroup/>', { 'class': 'z2m-filter-orphans', label: '⚠' }).appendTo($filter);
+                }
+                addOption($orphans, value, value);
+            }
+        });
+
+        $filter.multipleSelect('enable');
+        $filter.multipleSelect('refresh'); // sincronizar o modelo interno com as <option> acabadas de criar
+
+        that.filterProperties = wanted.filter(function (value) {
+            return $filter.find('option[value="' + value.replace(/"/g, '\\"') + '"]').length > 0;
+        });
+        $filter.multipleSelect('setSelects', that.filterProperties);
+
+        that.debug.log('|     ✅ Filter options:', $filter.find('option').length, '| selected:', that.filterProperties);
+        that.debug.log('╔═══════════════════════════════════════════════════════════╗');
+        that.debug.log('║ 🔎 [buildFilterPropertiesInput] COMPLETE                  ║');
         that.debug.log('╚═══════════════════════════════════════════════════════════╝');
     }
 
