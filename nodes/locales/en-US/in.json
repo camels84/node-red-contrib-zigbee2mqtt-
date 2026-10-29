@@ -15,7 +15,11 @@
         "filter_changes_help": "Send only if value changes",
         "output": "Output",
         "enable_multiple": "Multiple input",
-        "enable_multiple_help": "Listen multiple devices"
+        "enable_multiple_help": "Listen multiple devices",
+        "filter_properties": "Filter properties",
+        "filter_properties_help": "Only changes in the selected properties count as a change (empty = whole payload)",
+        "expose_to_home_assistant": "Home Assistant",
+        "expose_to_home_assistant_help": "Expose to Home Assistant (MQTT Discovery, with an enabled switch)"
     },
     "placeholder": {
         "name": "Name"
@@ -35,7 +39,8 @@
         "complete_payload": "Complete state payload",
         "zigbee2mqtt": "Zigbee2Mqtt",
         "homekit": "Homekit",
-        "groups": "Groups"
+        "groups": "Groups",
+        "all_properties": "All properties"
     },
     "tip": {
         "deploy": "<b>Important:</b> deploy server node to get devices list"
