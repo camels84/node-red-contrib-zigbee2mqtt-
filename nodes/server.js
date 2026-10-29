@@ -7,49 +7,18 @@ var vizInstancePromise = Viz.instance();
 // "Logger Node-RED" select (node-config-input-debug_level). It is independent from the
 // runtime debug (Z2MDebug), which keeps working exactly as before.
 const Z2MLogger = require('../resources/js/node-red-contrib-zigbee2mqtt-logger.js').Logger;
+// Home Assistant (MQTT Discovery): constantes, discovery, estado enabled/disabled e fila - tudo neste módulo
+const HAHelper = require('../resources/js/node-red-contrib-zigbee2mqtt-homeassistant.js');
 
 
 
 // ═══════════════════════════════════════════════════════════════════════════
-// v3.1.0 - HOME ASSISTANT (MQTT Discovery) - constantes e funções de suporte
+// v3.1.0 - HOME ASSISTANT (MQTT Discovery): TODO o código vive agora em
+//   resources/js/node-red-contrib-zigbee2mqtt-homeassistant.js
+// (constantes, device_class, discovery, estado enabled/disabled, fila de mensagens).
+// Aqui ficam apenas wrappers finos com os MESMOS nomes de método, para que o in.js
+// e os callbacks MQTT deste ficheiro continuem a funcionar sem alterações.
 // ═══════════════════════════════════════════════════════════════════════════
-
-/** Tempo (ms) à espera do estado "enabled" (retained) do HA antes de assumir ON */
-const HA_STATE_TIMEOUT_MS = 3000;
-
-/** property do Zigbee2MQTT -> device_class do Home Assistant (sensor) */
-const HA_SENSOR_DEVICE_CLASS = {
-    temperature: 'temperature', humidity: 'humidity', pressure: 'pressure', battery: 'battery',
-    illuminance: 'illuminance', illuminance_lux: 'illuminance', co2: 'carbon_dioxide',
-    voltage: 'voltage', current: 'current', power: 'power', energy: 'energy'
-};
-
-/** property do Zigbee2MQTT -> device_class do Home Assistant (binary_sensor) */
-const HA_BINARY_DEVICE_CLASS = {
-    occupancy: 'occupancy', presence: 'presence', water_leak: 'moisture', smoke: 'smoke',
-    tamper: 'tamper', battery_low: 'battery'
-};
-
-/** Achata a árvore de exposes (features/composites) devolvendo só as folhas */
-function flattenExposes(list) {
-    const out = [];
-    (function walk(items) {
-        if (!Array.isArray(items)) return;
-        items.forEach(function (expose) {
-            if (!expose || typeof expose !== 'object') return;
-            if (Array.isArray(expose.features)) walk(expose.features);
-            else out.push(expose);
-        });
-    })(list);
-    return out;
-}
-
-/** Valor binário do Z2M -> texto que o template Jinja do HA devolve (true -> "True") */
-function haBinaryText(value, fallbackBool) {
-    if (value === undefined || value === null) return fallbackBool ? 'True' : 'False';
-    if (typeof value === 'boolean') return value ? 'True' : 'False';
-    return String(value);
-}
 
 module.exports = function(RED) {
     "use strict";
@@ -75,6 +44,8 @@ module.exports = function(RED) {
             // v3.1.0: nós "in" expostos ao Home Assistant (objectId -> nó) e cache do último discovery publicado
             node.haNodes = new Map();
             node.haConfigCache = new Map();
+            // v3.1.x: gestor Home Assistant (adota os Maps acima; toda a lógica está no módulo)
+            node.ha = HAHelper.createHomeAssistantManager(node);
             node.availability = {};
             node.bridge_info = null;
             node.bridge_state = null;
@@ -977,304 +948,74 @@ module.exports = function(RED) {
         }
 
         // ═══════════════════════════════════════════════════════════════════
-        // v3.1.0 - HOME ASSISTANT: MQTT Discovery + estado enabled/disabled
+        // v3.1.0 - HOME ASSISTANT: wrappers finos
+        // A implementação está em resources/js/node-red-contrib-zigbee2mqtt-homeassistant.js
+        // (node.ha = HomeAssistantManager). Os nomes públicos mantêm-se: o in.js chama
+        // registerHomeAssistantNode/unregisterHomeAssistantNode e os callbacks MQTT chamam os restantes.
         // ═══════════════════════════════════════════════════════════════════
-        //
-        // Por cada nó "in" com exposeToHomeAssistant publica (retained):
-        //   homeassistant/<sensor|binary_sensor>/<node_id>/config   -> a entidade com o valor
-        //   homeassistant/switch/<node_id>_enabled/config            -> switch "enabled" do nó
-        // O estado do switch vive em  node-red/<base>/ha/<node_id>/enabled  (retained, ON/OFF)
-        // e o HA comanda-o em         node-red/<base>/ha/<node_id>/enabled/set
 
-        /** id seguro para usar em tópicos/unique_id a partir do id do nó Node-RED */
-        haObjectId(clientNode) {
-            return String(clientNode.id).replace(/[^a-zA-Z0-9_-]/g, '');
+        haObjectId(...args) {
+            return this.ha.haObjectId(...args);
         }
 
-        haIdFromString(value) {
-            return String(value).replace(/[^a-zA-Z0-9_-]/g, '');
+        haIdFromString(...args) {
+            return this.ha.haIdFromString(...args);
         }
 
-        getHaDiscoveryPrefix() {
-            return 'homeassistant';
+        getHaDiscoveryPrefix(...args) {
+            return this.ha.getHaDiscoveryPrefix(...args);
         }
 
-        /** node-red/<base>/ha/  (sempre com barra final) */
-        getHaTopicPrefix() {
-            return 'node-red/' + this.getBaseTopic() + '/ha/';
+        getHaTopicPrefix(...args) {
+            return this.ha.getHaTopicPrefix(...args);
         }
 
-        /** disponibilidade = o mesmo tópico retained/LWT do servidor ({"state":"online"|"offline"}) */
-        haAvailability() {
-            return {
-                availability_topic: this.getStatusTopic(),
-                availability_template: '{{ value_json.state }}',
-                payload_available: 'online',
-                payload_not_available: 'offline'
-            };
+        haAvailability(...args) {
+            return this.ha.haAvailability(...args);
         }
 
-        registerHomeAssistantNode(clientNode) {
-            const node = this;
-            if (!node.haNodes) return;
-            const objId = node.haObjectId(clientNode);
-            clientNode._haObjectId = objId;
-            node.haNodes.set(objId, clientNode);
-            node.logger.debug('Home Assistant: node "' + (clientNode.name || clientNode.id) + '" registered as ' + objId);
-
-            // Se o MQTT já está ligado anuncia já; senão onMQTTConnect() trata de tudo.
-            if (node.mqtt && node.connection) {
-                node.subscribeHomeAssistant();
-                node.publishHomeAssistantDiscovery(clientNode, true);
-                node.scheduleHomeAssistantStateFallback(clientNode);
-            }
+        registerHomeAssistantNode(...args) {
+            return this.ha.registerHomeAssistantNode(...args);
         }
 
-        unregisterHomeAssistantNode(clientNode, removed) {
-            const node = this;
-            if (!node.haNodes) return;
-            const objId = clientNode._haObjectId || node.haObjectId(clientNode);
-            clearTimeout(clientNode._haFallbackTimer);
-            if (node.haNodes.get(objId) === clientNode) node.haNodes.delete(objId);
-            node.logger.debug('Home Assistant: node ' + objId + ' unregistered (' + (removed ? 'removed' : 'restart/deploy') + ')');
-            // só apaga a entidade do HA se o nó foi mesmo removido (um deploy normal volta a anunciá-la)
-            if (removed) node.clearHomeAssistantDiscovery(objId);
+        unregisterHomeAssistantNode(...args) {
+            return this.ha.unregisterHomeAssistantNode(...args);
         }
 
-        /** Apaga (payload vazio retained) todos os tópicos de discovery e o estado de um nó */
-        clearHomeAssistantDiscovery(objId) {
-            const node = this;
-            if (!node.mqtt || !node.connection || !node.haConfigCache) return;
-            node.haConfigCache.forEach(function (entry, topic) {
-                if (entry.objId === objId) {
-                    node.mqtt.publish(topic, '', {qos: 1, retain: true});
-                    node.haConfigCache.delete(topic);
-                }
-            });
-            node.mqtt.publish(node.getHaTopicPrefix() + objId + '/enabled', '', {qos: 1, retain: true});
-            node.logger.notice('Home Assistant: entities of node ' + objId + ' removed');
+        clearHomeAssistantDiscovery(...args) {
+            return this.ha.clearHomeAssistantDiscovery(...args);
         }
 
-        subscribeHomeAssistant() {
-            const node = this;
-            if (!node.mqtt || !node.haNodes || !node.haNodes.size) return;
-            const topic = node.getHaTopicPrefix() + '#';
-            node.mqtt.subscribe(topic, {qos: 1}, function (err) {
-                if (err) node.logger.warn('Home Assistant: could not subscribe to "' + topic + '": ' + err.message);
-                else node.logger.debug('Home Assistant: subscribed to "' + topic + '"');
-            });
+        subscribeHomeAssistant(...args) {
+            return this.ha.subscribeHomeAssistant(...args);
         }
 
-        publishHomeAssistantEnabledState(clientNode, enabled) {
-            const node = this;
-            if (!node.mqtt || !node.connection) return;
-            const objId = clientNode._haObjectId || node.haObjectId(clientNode);
-            node.mqtt.publish(node.getHaTopicPrefix() + objId + '/enabled', enabled ? 'ON' : 'OFF', {qos: 1, retain: true});
+        publishHomeAssistantEnabledState(...args) {
+            return this.ha.publishHomeAssistantEnabledState(...args);
         }
 
-        /**
-         * Se o HA não responder com o estado retained do switch dentro de HA_STATE_TIMEOUT_MS,
-         * assume ON (primeira vez) para o nó não ficar para sempre a guardar mensagens.
-         */
-        scheduleHomeAssistantStateFallback(clientNode) {
-            const node = this;
-            if (clientNode.homeAssistantStateInitialized) return;
-            clearTimeout(clientNode._haFallbackTimer);
-            clientNode._haFallbackTimer = setTimeout(function () {
-                if (clientNode.homeAssistantStateInitialized) return;
-                node.logger.debug('Home Assistant: no enabled state received for ' + (clientNode._haObjectId || clientNode.id) + ' within ' + (HA_STATE_TIMEOUT_MS / 1000) + 's - assuming ON');
-                node.publishHomeAssistantEnabledState(clientNode, true);
-                clientNode.setHomeAssistantState(true);
-            }, HA_STATE_TIMEOUT_MS);
+        scheduleHomeAssistantStateFallback(...args) {
+            return this.ha.scheduleHomeAssistantStateFallback(...args);
         }
 
-        /**
-         * Constrói as entidades de discovery de um nó "in".
-         * @returns {{entities: Array, complete: boolean}} complete=false se a lista de devices ainda
-         *          não está carregada (não se deve apagar entidades antigas nesse caso)
-         */
-        buildHomeAssistantEntities(clientNode) {
-            const node = this;
-            const cfg = clientNode.config || {};
-            const objId = clientNode._haObjectId || node.haObjectId(clientNode);
-            const label = clientNode.name || cfg.friendly_name || ('Z2M ' + objId);
-            const prefix = node.getHaTopicPrefix();
-            const availability = node.haAvailability();
-            const device = {
-                identifiers: ['nodered_z2m_' + objId],
-                name: label,
-                manufacturer: 'Node-RED',
-                model: 'zigbee2mqtt-eb in'
-            };
-            const entities = [];
-            let complete = true;
-
-            // 1) switch "enabled" (liga/desliga o nó a partir do HA)
-            entities.push({
-                component: 'switch',
-                id: objId + '_enabled',
-                payload: Object.assign({
-                    unique_id: 'nodered_z2m_' + objId + '_enabled',
-                    name: label + ' enabled',
-                    command_topic: prefix + objId + '/enabled/set',
-                    state_topic: prefix + objId + '/enabled',
-                    payload_on: 'ON', payload_off: 'OFF',
-                    state_on: 'ON', state_off: 'OFF',
-                    entity_category: 'config',
-                    device: device
-                }, availability)
-            });
-
-            // 2) sensor / binary_sensor por device
-            const keys = cfg.enableMultiple
-                ? (Array.isArray(cfg.device_id) ? cfg.device_id : [])
-                : (cfg.device_id ? [cfg.device_id] : []);
-            const stateList = node.normalizeList(cfg.state).filter(function (p) {
-                return p.indexOf('homekit_') !== 0 && p.indexOf("'") < 0;
-            });
-            if (!node.devices) complete = false;
-
-            keys.forEach(function (key) {
-                const item = node.getDeviceOrGroupByKey(key);
-                if (!item) {
-                    complete = false;
-                    node.logger.throttle('debug', 'ha-nodev:' + key, 60000, 'Home Assistant: device/group "' + key + '" not found yet - entity not announced');
-                    return;
-                }
-                const exposes = flattenExposes(item.definition && item.definition.exposes);
-                const findExpose = function (p) {
-                    for (let i = 0; i < exposes.length; i++) if (exposes[i].property === p) return exposes[i];
-                    return null;
-                };
-
-                // propriedade principal = estado do HA: 1ª escolhida > "state" > 1º expose legível > linkquality
-                let primary = stateList[0] || null;
-                if (!primary && findExpose('state')) primary = 'state';
-                if (!primary) {
-                    const readable = exposes.find(function (e) { return e.property && ((Number(e.access) || 0) & 1); });
-                    primary = readable ? readable.property : 'linkquality';
-                }
-                const expose = findExpose(primary);
-                const friendly = item.friendly_name || item.ieee_address || String(key);
-                const stateTopic = node.getTopic('/' + friendly);
-                const entityId = cfg.enableMultiple ? (objId + '_' + node.haIdFromString(item.ieee_address || item.id || key)) : objId;
-                const isBinary = !!expose && expose.type === 'binary';
-                const isNumeric = !!expose && expose.type === 'numeric';
-
-                const payload = Object.assign({
-                    unique_id: 'nodered_z2m_' + entityId,
-                    name: cfg.enableMultiple ? (label + ' ' + friendly) : label,
-                    state_topic: stateTopic,
-                    value_template: "{{ value_json['" + primary + "'] }}",
-                    device: device
-                }, availability);
-
-                if (isBinary) {
-                    payload.payload_on = haBinaryText(expose.value_on, true);
-                    payload.payload_off = haBinaryText(expose.value_off, false);
-                    if (HA_BINARY_DEVICE_CLASS[primary]) payload.device_class = HA_BINARY_DEVICE_CLASS[primary];
-                } else if (isNumeric) {
-                    if (expose.unit) payload.unit_of_measurement = expose.unit;
-                    if (HA_SENSOR_DEVICE_CLASS[primary]) payload.device_class = HA_SENSOR_DEVICE_CLASS[primary];
-                    payload.state_class = primary === 'energy' ? 'total_increasing' : 'measurement';
-                }
-
-                // várias propriedades (ou nenhuma = payload completo): o resto vai para os atributos da entidade
-                if (stateList.length !== 1) {
-                    payload.json_attributes_topic = stateTopic;
-                    if (stateList.length > 1) {
-                        payload.json_attributes_template = '{{ {' + stateList.map(function (p) {
-                            return "'" + p + "': value_json.get('" + p + "')";
-                        }).join(', ') + '} | tojson }}';
-                    }
-                }
-
-                entities.push({component: isBinary ? 'binary_sensor' : 'sensor', id: entityId, payload: payload});
-            });
-
-            return {entities: entities, complete: complete};
+        buildHomeAssistantEntities(...args) {
+            return this.ha.buildHomeAssistantEntities(...args);
         }
 
-        /**
-         * Publica (retained) o discovery de um nó. Só republica se o payload mudou (ou force=true).
-         * Entidades antigas do mesmo nó que já não existem (ex.: sensor -> binary_sensor) são apagadas.
-         */
-        publishHomeAssistantDiscovery(clientNode, force) {
-            const node = this;
-            if (!node.mqtt || !node.connection || !node.haConfigCache) return;
-
-            const objId = clientNode._haObjectId || node.haObjectId(clientNode);
-            const built = node.buildHomeAssistantEntities(clientNode);
-            const discoveryPrefix = node.getHaDiscoveryPrefix();
-            const seen = new Set();
-            let published = 0;
-
-            built.entities.forEach(function (entity) {
-                const topic = discoveryPrefix + '/' + entity.component + '/' + entity.id + '/config';
-                const body = JSON.stringify(entity.payload);
-                seen.add(topic);
-
-                const cached = node.haConfigCache.get(topic);
-                if (!force && cached && cached.body === body) return;
-
-                node.mqtt.publish(topic, body, {qos: 1, retain: true}, function (err) {
-                    if (err) node.logger.warn('Home Assistant: discovery publish failed for ' + topic + ': ' + err.message);
-                });
-                node.haConfigCache.set(topic, {objId: objId, body: body});
-                published++;
-                node.logger.debug('Home Assistant: discovery published to ' + topic);
-            });
-
-            if (built.complete) {
-                node.haConfigCache.forEach(function (entry, topic) {
-                    if (entry.objId === objId && !seen.has(topic)) {
-                        node.mqtt.publish(topic, '', {qos: 1, retain: true});
-                        node.haConfigCache.delete(topic);
-                        node.logger.debug('Home Assistant: stale entity removed (' + topic + ')');
-                    }
-                });
-            }
-            if (published) {
-                node.logger.notice('Home Assistant: ' + published + ' entity(ies) announced for node "' + (clientNode.name || objId) + '"');
-            }
+        publishHomeAssistantDiscovery(...args) {
+            return this.ha.publishHomeAssistantDiscovery(...args);
         }
 
-        /** Anuncia todos os nós expostos (ligação MQTT, bridge online, lista de devices atualizada) */
-        announceHomeAssistantNodes(force) {
-            const node = this;
-            if (!node.haNodes || !node.haNodes.size) return;
-            node.haNodes.forEach(function (clientNode) {
-                node.publishHomeAssistantDiscovery(clientNode, !!force);
-            });
+        announceHomeAssistantNodes(...args) {
+            return this.ha.announceHomeAssistantNodes(...args);
         }
 
-        /** Mensagens em node-red/<base>/ha/<node_id>/enabled[/set] */
-        onHomeAssistantMessage(topic, messageString) {
-            const node = this;
-            const parts = topic.slice(node.getHaTopicPrefix().length).split('/');
-            const clientNode = node.haNodes.get(parts[0]);
-            if (!clientNode) {
-                node.logger.debug('Home Assistant: message for an unregistered node ignored (' + topic + ')');
-                return;
-            }
-            const value = String(messageString).trim().toUpperCase();
+        onHomeAssistantMessage(...args) {
+            return this.ha.onHomeAssistantMessage(...args);
+        }
 
-            if (parts.length === 2 && parts[1] === 'enabled') {
-                if (value === '') return; // retained apagado
-                clearTimeout(clientNode._haFallbackTimer);
-                clientNode.setHomeAssistantState(value !== 'OFF');
-            } else if (parts.length === 3 && parts[1] === 'enabled' && parts[2] === 'set') {
-                let enabled;
-                if (value === 'ON') enabled = true;
-                else if (value === 'OFF') enabled = false;
-                else if (value === 'TOGGLE') enabled = !clientNode.homeAssistantEnabled;
-                else {
-                    node.logger.debug('Home Assistant: invalid command "' + messageString + '" for ' + parts[0]);
-                    return;
-                }
-                // fonte única de verdade: publicar o estado retained (volta por subscrição e aplica-se ao nó)
-                node.publishHomeAssistantEnabledState(clientNode, enabled);
-            }
+        onZigbeeEntitiesUpdated(...args) {
+            return this.ha.onZigbeeEntitiesUpdated(...args);
         }
 
         nodeSend(node, opts) {
@@ -1738,6 +1479,8 @@ module.exports = function(RED) {
                             node.context().global.set('z2m_devices_' + node.id, devices);
                             // v3.1.0: as exposes podem ter mudado (sensor <-> binary_sensor) - republica só o que mudou
                             try { node.announceHomeAssistantNodes(false); } catch (haErr) { node.logger.warn('Home Assistant: discovery update failed: ' + haErr.message); }
+                            // v3.1.x: deteção de devices novos/removidos/renomeados (middleware independente)
+                            try { node.onZigbeeEntitiesUpdated('devices', devices); } catch (haErr) { node.logger.warn('Home Assistant: entity detection failed: ' + haErr.message); }
                         } catch (e) {
                             node.warn('Failed to parse devices JSON: ' + e.message);
                         }
@@ -1751,6 +1494,8 @@ module.exports = function(RED) {
                             node.logger[node._groupCount === grpCount ? 'debug' : 'notice']('Zigbee2MQTT group list received: ' + grpCount + ' groups');
                             node._groupCount = grpCount;
                             node.context().global.set('z2m_groups_' + node.id, groups);
+                            // v3.1.x: nós "in" apontados a GRUPOS só podem ser anunciados depois de a lista de grupos chegar
+                            try { node.onZigbeeEntitiesUpdated('groups', groups); } catch (haErr) { node.logger.warn('Home Assistant: entity detection failed: ' + haErr.message); }
                         } catch (e) {
                             node.warn('Failed to parse groups JSON: ' + e.message);
                         }
