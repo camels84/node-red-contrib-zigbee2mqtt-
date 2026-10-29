@@ -1,6 +1,7 @@
 {
     "label": {
         "name": "Name",
+        "friendly_name": "Friendly name",
         "server": "Server",
         "topic": "Device",
         "command": "Command",
@@ -14,6 +15,7 @@
     },
     "placeholder": {
         "name": "Name",
+        "friendly_name": "Friendly name",
         "transition": "in seconds"
     },
     "status": {
