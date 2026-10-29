@@ -102,6 +102,15 @@
             <span></span>
         </div>
 
+        <!-- ============================================================================ -->
+        <!-- 📤 SAÍDA OPCIONAL: emite o estado atualizado do device após o comando         -->
+        <!-- O número de saídas (0/1) é calculado no oneditsave a partir desta checkbox.  -->
+        <!-- ============================================================================ -->
+        <div class="form-row">
+            <input type="checkbox" id="node-input-outputEnabled" style="display: inline-block; width: auto; vertical-align: top;">
+            <label for="node-input-outputEnabled" style="width: auto;"><i class="fa fa-share-square"></i> <span data-i18n="label.output_enabled"></span></label>
+        </div>
+
         <div class="form-row node-input-rule-container-row">
             <ol id="node-input-rule-container"></ol>
         </div>
@@ -160,13 +169,29 @@
                 },
                 manualPayloadSliderVisible: {
                     value: true,
+                },
+                // ── Saída opcional "updated state" ─────────────────────────────
+                // outputEnabled: estado da checkbox (#node-input-outputEnabled). Tem de estar
+                //                em defaults para o Node-RED o gravar/carregar automaticamente.
+                // outputs:       propriedade especial do Node-RED que define o nº de saídas
+                //                (0 ou 1). É calculada no oneditsave - não tem input próprio.
+                outputEnabled: {
+                    value: false,
+                },
+                outputs: {
+                    value: 0,
                 }
             },
             inputLabels: "value",
-            outputLabels: ["success"],
+            // [ORIGINAL] outputLabels: ["success"],
+            // Só é chamada para as saídas que existem (outputs = 1) -> index 0 = "updated state"
+            outputLabels: function(index) {
+                return RED._("@evilbunny/node-red-contrib-zigbee2mqtt/out:label.output_state");
+            },
             paletteLabel: 'out',
             inputs: 1,
-            outputs: 1,
+            // [ORIGINAL] outputs: 1,
+            outputs: 0,
             icon: "icon.png",
             label: function() {
                 var label = 'z2m-out';
@@ -254,9 +279,20 @@
                 
                 // 5. Checkbox Manual Slider
                 node.manualPayloadSliderVisible = $('#node-input-manualPayloadSliderVisible').is(':checked');
+
+                // 6. Saída opcional "updated state"
+                //    outputEnabled=true  -> 1 saída (estado atualizado do device)
+                //    outputEnabled=false -> 0 saídas (comportamento "fire and forget")
+                //    O Node-RED compara o valor antigo/novo de `outputs` depois do oneditsave e
+                //    cria/remove a porta (e os fios) por si - tal como o node "switch".
+                const outputEnabled = $('#node-input-outputEnabled').is(':checked');
+                node.outputEnabled = outputEnabled;
+                node.outputs = outputEnabled ? 1 : 0;
                 
                 if (d && d.log) 
                     d.log('Saved Node State:', node.command, node.payload);
+                if (d && d.log) 
+                    d.log('Saved Output State: outputEnabled=', node.outputEnabled, 'outputs=', node.outputs);
                 return true;
             }
 
