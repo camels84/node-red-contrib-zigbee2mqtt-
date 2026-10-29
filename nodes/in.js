@@ -130,6 +130,10 @@ module.exports = function(RED) {
                 }
             }
 
+            // v3.3.9: payload MQTT BRUTO (só as chaves publicadas nesta mensagem) para a filtragem granular
+            const rawPayload = (data && data.payload && typeof data.payload === 'object') ? data.payload : null;
+            node.logger.debug('[Z2M] Granular filtering: raw payload keys [' + (rawPayload ? Object.keys(rawPayload).join(', ') : '-') + ']');
+
             if (node.config.enableMultiple) {
                 if (data.item &&
                     (("ieee_address" in data.item && (node.config.device_id).includes(data.item.ieee_address))
@@ -138,7 +142,8 @@ module.exports = function(RED) {
                     node.server.nodeSend(node, {
                         'changed' : data,
                         'retained': data.retained,
-                        'filterProperties': node.config.filterProperties
+                        'filterProperties': node.config.filterProperties,
+                        'rawPayload': rawPayload
                     });
                 }
 
@@ -151,7 +156,8 @@ module.exports = function(RED) {
                     node.server.nodeSend(node, {
                         'filter':  node.config.filterChanges,
                         'retained': data.retained,
-                        'filterProperties': node.config.filterProperties
+                        'filterProperties': node.config.filterProperties,
+                        'rawPayload': rawPayload
                     });
                 }
             }
