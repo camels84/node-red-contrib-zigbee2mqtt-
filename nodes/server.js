@@ -555,8 +555,11 @@ module.exports = function(RED) {
         
         if (val === true || val === 'true' || parseInt(val) > 0) {
             // Ativar pairing mode
+            // [ORIGINAL v3.3.8] payload = { 'value': true, 'time': time };
+            // v3.1.0: formato do endpoint /bridge/request/permit_join = apenas {"time": N}.
+            //   Equivale a {"time": val ? 180 : 0}, mas mantém o customTime vindo do editor (default 180s)
+            //   e avalia 'val' de forma robusta (a string 'false' seria truthy num "val ? 180 : 0" literal).
             payload = {
-                'value': true,
                 'time': time
             };
             
@@ -570,8 +573,10 @@ module.exports = function(RED) {
             
         } else {
             // Desativar pairing mode
+            // [ORIGINAL v3.3.8] payload = { 'value': false };
+            // v3.1.0: desativar o pairing = {"time": 0}
             payload = {
-                'value': false
+                'time': 0
             };
             node.log('Permit Join DISABLED');
         }
@@ -579,6 +584,8 @@ module.exports = function(RED) {
         // PUBLICAR NO TÓPICO CORRETO
         // Zigbee2MQTT v1.x usa 'value', versões mais recentes podem aceitar boolean direto ou payload diferente.
         // O formato {"value": true, "time": 180} é o padrão atual para /bridge/request/permit_join
+        // v3.1.0: o payload já não leva 'value' (v3.3.8 enviava {"value": true, "time": N} / {"value": false})
+        node.logger.debug('permit_join request -> ' + node.getTopic('/bridge/request/permit_join') + ' ' + JSON.stringify(payload));
         node.mqtt.publish(
             node.getTopic('/bridge/request/permit_join'),
             JSON.stringify(payload),
@@ -1338,12 +1345,17 @@ module.exports = function(RED) {
                     const parsed = JSON.parse(messageString);
                     
                     // Verifica se o resultado é um objeto válido e não null
-                    if (parsed && typeof parsed === 'object') {
+                    // v3.1.0: arrays também ficam de fora (Object.assign({}, [..]) geraria chaves "0","1",...)
+                    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
                         payload = {};
                         Object.assign(payload, parsed); // Mantém o comportamento original de clonagem
                     } else {
                         // Se for JSON válido mas não um objeto (ex: número solto), trata como string
                         // para manter consistência com a lógica de Object.assign
+                        if (Array.isArray(parsed)) {
+                            node.logger.throttle('debug', 'state-array:' + topic, 60000,
+                                'State topic "' + topic + '" carries a JSON array - handled as plain text (not merged into the device state)');
+                        }
                         payload = messageString;
                     }
                 } catch (e) {
@@ -1361,10 +1373,49 @@ module.exports = function(RED) {
                     node.devices_values.delete(oldestKey);
                 }
  
+                // ═══════════════════════════════════════════════════════════════════
+                // v3.1.0 - Preservação de propriedades em updates parciais
+                // O Zigbee2MQTT publica muitas vezes só o que mudou (ex.: {"battery": 90}).
+                // O estado em cache é a fusão {...previousPayload, ...parsedPayload}.
+                // ═══════════════════════════════════════════════════════════════════
+                const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+                const previousPayload = node.devices_values.get(topic);   // devices_values é um Map (não node.devices_values[topic])
+
+                if (isPlainObject(previousPayload) && isPlainObject(payload)) {
+                    const mergedPayload = { ...previousPayload, ...payload };
+
+                    // 'action' é um EVENTO (clique de botão), não um estado: se o update parcial
+                    // não traz 'action', o valor antigo não pode ficar em cache, senão cada update
+                    // de bateria/linkquality voltava a reprocessar o último clique.
+                    if (!('action' in payload) && ('action' in mergedPayload)) {
+                        node.logger.debug('Stale "action" (' + JSON.stringify(mergedPayload.action) + ') removed from the cached state of "' + topic + '" (partial update without action)');
+                        delete mergedPayload.action;
+                    }
+
+                    // Delete + Set para atualizar a ordem de inserção (LRU verdadeiro)
+                    node.devices_values.delete(topic);
+                    node.devices_values.set(topic, mergedPayload);
+
+                    // JSON.stringify só corre com o nível debug ativo (evita custo em cada mensagem MQTT)
+                    if (node.logger.isEnabled('debug')) {
+                        node.logger.debug('Merged state for "' + topic + '": ' + JSON.stringify(mergedPayload));
+                    }
+                } else {
+                    // Primeira mensagem do tópico (ou payload não-objeto): não há nada para fundir
+                    //Delete and Set to update insertion order
+                    node.devices_values.delete(topic);
+                    node.devices_values.set(topic, payload);
+
+                    if (isPlainObject(payload) && node.logger.isEnabled('debug')) {
+                        node.logger.debug('First state cached for "' + topic + '": ' + JSON.stringify(payload));
+                    }
+                }
+
+                /* [ORIGINAL v3.3.8 - substituído pelo bloco acima]
                 const currentVal = node.devices_values.get(topic);
                 if (currentVal && typeof currentVal === 'object' && typeof payload === 'object') {
                     // Merge new payload into existing object
-                    Object.assign(currentVal, payload);
+                    Object.assign(currentVal, payload);   // mutava o objeto em cache e NUNCA removia 'action'
                     // 🔥 FIX: Delete and Set to update insertion order (True LRU)
                     node.devices_values.delete(topic);
                     // Re-set to update order (LRU behavior) if desired, or just leave modified object
@@ -1374,6 +1425,7 @@ module.exports = function(RED) {
                     node.devices_values.delete(topic);
                     node.devices_values.set(topic, payload);
                 }
+                */
                 
                 node.emit('onMQTTMessage', {
                     topic: topic,
