@@ -1,5 +1,177 @@
 const Zigbee2mqttHelper = require('../resources/Zigbee2mqttHelper.js');
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 📤 SAÍDA OPCIONAL "updated state" - constantes e funções de suporte
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Tempo máximo (ms) à espera que o Zigbee2MQTT publique o novo estado após um comando */
+const PENDING_OUTPUT_TIMEOUT_MS = 30 * 1000;
+
+/** Proteção de memória: máximo de comandos em espera por tópico de estado */
+const MAX_PENDING_PER_TOPIC = 20;
+
+const SET_SUFFIX_REGEX = /\/set$/i;
+
+/**
+ * Comandos cujo "eco" no estado NÃO tem o mesmo nome da propriedade enviada.
+ * Ex.: brightness_step -> o Z2M publica o novo "brightness".
+ */
+const ECHO_ALIASES = {
+    brightness_move:       ['brightness'],
+    brightness_step:       ['brightness'],
+    brightness_move_onoff: ['brightness'],
+    brightness_step_onoff: ['brightness'],
+    color_temp_move:       ['color_temp'],
+    color_temp_step:       ['color_temp']
+};
+
+/** Comandos sem eco previsível (scene_recall, scene_store, ...) -> aceitam qualquer atualização */
+const NO_ECHO_REGEX = /^scene_/;
+
+/** O item é um grupo? (os devices têm sempre ieee_address; os grupos têm apenas id) */
+function isGroupItem(item) {
+    return !!item && !item.ieee_address && item.id !== undefined && item.id !== null;
+}
+
+/**
+ * Nomes de endpoint conhecidos de um device (definition.exposes[].endpoint + chaves de item.endpoints).
+ * Usado para validar que "left" em "sw/left/set" é mesmo um endpoint e não parte do friendly_name.
+ */
+function collectEndpoints(item) {
+    const found = new Set();
+    (function walk(list) {
+        if (!Array.isArray(list)) return;
+        list.forEach(function (expose) {
+            if (!expose || typeof expose !== 'object') return;
+            if (expose.endpoint) found.add(String(expose.endpoint));
+            if (Array.isArray(expose.features)) walk(expose.features);
+        });
+    })(item && item.definition && item.definition.exposes);
+    if (item && item.endpoints && typeof item.endpoints === 'object') {
+        Object.keys(item.endpoints).forEach(function (k) { found.add(String(k)); });
+    }
+    return found;
+}
+
+/** Se o device declara endpoints, o candidato tem de pertencer-lhes; se não declara nenhum, aceita-se. */
+function isValidEndpoint(item, candidate) {
+    if (!candidate) return false;
+    const known = collectEndpoints(item);
+    return known.size === 0 || known.has(String(candidate));
+}
+
+/**
+ * Resolve a "chave" de destino de um comando para um device/grupo concreto.
+ *
+ * Aceita (key):
+ *   - ieee_address                      "0x00158d0001234567"
+ *   - friendly_name (com ou sem pastas) "sala/candeeiro"
+ *   - tópico completo                   "zigbee2mqtt/sala/candeeiro"
+ *   - tópico de comando                 "zigbee2mqtt/sala/candeeiro/set"
+ *   - endpoint específico               "zigbee2mqtt/interruptor/left/set" ou "interruptor/left"
+ *   - id de grupo                       5 | "5"
+ *
+ * @param {Object} server  nó zigbee2mqtt-eb-server
+ * @param {*}      key
+ * @returns {{
+ *   found: boolean, item: Object|null, isGroup: boolean,
+ *   friendly_name: string|null, ieee_address: string|null, groupId: *,
+ *   endpoint: string|null, hasSetSuffix: boolean,
+ *   stateTopic: string|null, setTopic: string|null
+ * }}
+ */
+function resolveDeviceTarget(server, key) {
+    const target = {
+        found: false, item: null, isGroup: false,
+        friendly_name: null, ieee_address: null, groupId: null,
+        endpoint: null, hasSetSuffix: false,
+        stateTopic: null, setTopic: null
+    };
+
+    if (!server || typeof server.getDeviceOrGroupByKey !== 'function') return target;
+    if (key === undefined || key === null) return target;
+
+    const raw = String(key).trim();
+    if (!raw) return target;
+
+    // 1) Procura direta (ieee_address, friendly_name, tópico completo, id de grupo)
+    let item = server.getDeviceOrGroupByKey(raw);
+    let endpoint = null;
+    let hasSetSuffix = false;
+
+    // 2) Tópico de comando: remover "/set" e o prefixo do base topic
+    if (!item) {
+        let path = raw;
+
+        if (SET_SUFFIX_REGEX.test(path)) {
+            hasSetSuffix = true;
+            path = path.replace(SET_SUFFIX_REGEX, '');
+        }
+
+        const base = (typeof server.getBaseTopic === 'function') ? server.getBaseTopic() : '';
+        if (base && path.indexOf(base + '/') === 0) {
+            path = path.slice(base.length + 1);
+        }
+        path = path.replace(/^\/+|\/+$/g, '');
+
+        if (path) {
+            item = server.getDeviceOrGroupByKey(path);
+
+            // 3) Endpoint específico: "<friendly_name>/<endpoint>" (o friendly_name pode ter pastas,
+            //    por isso só se corta o ÚLTIMO segmento e só se o resto for um device válido)
+            if (!item) {
+                const idx = path.lastIndexOf('/');
+                if (idx > 0) {
+                    const parentPath = path.slice(0, idx);
+                    const candidate = path.slice(idx + 1);
+                    const parent = server.getDeviceOrGroupByKey(parentPath);
+                    if (parent && !isGroupItem(parent) && isValidEndpoint(parent, candidate)) {
+                        item = parent;
+                        endpoint = candidate;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!item) return target;
+
+    const isGroup = isGroupItem(item);
+    target.found = true;
+    target.item = item;
+    target.isGroup = isGroup;
+    target.friendly_name = item.friendly_name || item.ieee_address || null;
+    target.ieee_address = isGroup ? null : (item.ieee_address || null);
+    target.groupId = isGroup ? item.id : null;
+    target.endpoint = isGroup ? null : endpoint;
+    target.hasSetSuffix = hasSetSuffix;
+
+    // O Z2M publica SEMPRE o estado em <base>/<friendly_name> (os endpoints vêm como state_left, ...),
+    // mas recebe os comandos em <base>/<friendly_name>[/<endpoint>]/set
+    target.stateTopic = server.getTopic('/' + target.friendly_name);
+    target.setTopic = target.stateTopic + (target.endpoint ? '/' + target.endpoint : '') + '/set';
+
+    return target;
+}
+
+/**
+ * Propriedades que se espera ver no estado publicado depois do comando.
+ * Lista vazia = qualquer atualização de estado serve de resposta.
+ */
+function deriveExpectedProps(toSend) {
+    if (!toSend || typeof toSend !== 'object' || Array.isArray(toSend)) return [];
+    const props = new Set();
+    Object.keys(toSend).forEach(function (k) {
+        if (NO_ECHO_REGEX.test(k)) return;
+        if (ECHO_ALIASES[k]) {
+            ECHO_ALIASES[k].forEach(function (p) { props.add(p); });
+        } else {
+            props.add(k);
+        }
+    });
+    return Array.from(props);
+}
+
 module.exports = function(RED) {
     class Zigbee2mqttNodeOut {
         constructor(config) {
@@ -9,6 +181,11 @@ module.exports = function(RED) {
             node.config = config;
             node.cleanTimer = null;
             node.server = RED.nodes.getNode(node.config.server);
+
+            // ── Saída opcional "updated state" ───────────────────────────────
+            node.outputEnabled = (config.outputEnabled === true || config.outputEnabled === 'true');
+            node.pendingOutputs = new Map();                   // stateTopic -> [entry, entry, ...] (FIFO)
+            node.pendingTimeoutMs = PENDING_OUTPUT_TIMEOUT_MS; // 30 s
 
             if (node.server) {
                 // ✅ SUBSCREVER EVENTOS DO SERVIDOR
@@ -20,6 +197,13 @@ module.exports = function(RED) {
 
                 node.listener_onMQTTBridgeState = function(data) { node.onMQTTBridgeState(data); }
                 node.server.on('onMQTTBridgeState', node.listener_onMQTTBridgeState);
+
+                // ✅ Só subscreve atualizações de estado se a saída estiver ativa
+                //    (nós sem saída não pagam qualquer custo em runtime)
+                if (node.outputEnabled) {
+                    node.listener_onMQTTMessage = function(data) { node.onMQTTMessage(data); }
+                    node.server.on('onMQTTMessage', node.listener_onMQTTMessage);
+                }
 
                 node.on('close', () => node.onClose());
 
@@ -43,10 +227,14 @@ module.exports = function(RED) {
                     send = send || function() { node.send.apply(node, arguments); };
                     done = done || function(err) { if (err) { node.error(err, message); } };
 
+                    // NOTA: a (única) saída do nó está reservada ao "updated state" e é emitida
+                    // por onMQTTMessage(). O antigo resultado booleano (success) deixou de sair
+                    // aqui - o resultado do envio é reportado através de done(err).
                     function sendResult(success, err) {
-                        let result = RED.util.cloneMessage(message);
-                        result.payload = success;
-                        send(result);
+                        // [ORIGINAL - desativado: a saída passou a ser reservada ao "updated state"]
+                        // let result = RED.util.cloneMessage(message);
+                        // result.payload = success;
+                        // send(result);
                         done(err);
                     }
 
@@ -69,7 +257,10 @@ module.exports = function(RED) {
                         key = message.topic;
                     }
                     
-                    let device = node.server.getDeviceOrGroupByKey(key);
+                    // ✅ Resolve device OU grupo, e deteta "/set" e endpoints (ex.: left/set)
+                    // [ORIGINAL] let device = node.server.getDeviceOrGroupByKey(key);
+                    const target = resolveDeviceTarget(node.server, key);
+                    let device = target.item;
                     
                     if (device) {
                         let payload;
@@ -397,7 +588,10 @@ module.exports = function(RED) {
                         if (payload !== undefined && payload !== null) {
                             let toSend = {};
                             let statusText = '';
-                            let topic = node.server.getTopic('/' + device.friendly_name + '/set');
+                            // /set normal, ou <fn>/<endpoint>/set quando o destino é um endpoint específico
+                            // [ORIGINAL] let topic = node.server.getTopic('/' + device.friendly_name + '/set');
+                            let topic = target.setTopic;
+                            let pendingEntry = null;
 
                             try {
                                 // Lógica de construção do objeto (Cores vs Simples)
@@ -420,12 +614,20 @@ module.exports = function(RED) {
                                     node.log('Published to mqtt topic: ' + topic + ' : ' + payloadStr);
                                 }
 
+                                // ✅ Registar o pedido ANTES de publicar: o Z2M pode responder
+                                //    (publicar o novo estado) antes de o callback do publish correr.
+                                if (node.outputEnabled) {
+                                    pendingEntry = node.registerPendingOutput(message, target, toSend);
+                                }
+
                                 node.server.mqtt.publish(
                                     topic,
                                     payloadStr,
                                     {'qos': parseInt(node.server.config.mqtt_qos || 0)},
                                     function(err) {
                                         if (err) {
+                                            // falhou o envio -> nunca haverá resposta, não ficar à espera
+                                            node.removePendingOutput(pendingEntry);
                                             node.status({fill: "red", shape: "dot", text: "publish failed"});
                                             node.error("MQTT publish error: " + err.message, message);
                                         }
@@ -434,7 +636,8 @@ module.exports = function(RED) {
                                 );
 
                                 // Atualizar Status Visual
-                                let fill = node.server.getDeviceAvailabilityColor(node.server.getTopic('/' + device.friendly_name));
+                                // [ORIGINAL] let fill = node.server.getDeviceAvailabilityColor(node.server.getTopic('/' + device.friendly_name));
+                                let fill = node.server.getDeviceAvailabilityColor(target.stateTopic);
                                 node.status({ fill: fill, shape: "dot", text: statusText });
                                 
                                 node.cleanTimer = setTimeout(function(){
@@ -442,6 +645,7 @@ module.exports = function(RED) {
                                 }, 3000);
 
                             } catch (e) {
+                                node.removePendingOutput(pendingEntry);
                                 node.error("Serialization error: " + e.message, message);
                                 node.status({fill: "red", shape: "dot", text: "error"});
                                 sendResult(false, e);
@@ -496,6 +700,126 @@ module.exports = function(RED) {
             }
         }
 
+        // ═══════════════════════════════════════════════════════════════════
+        // 📤 SAÍDA OPCIONAL "updated state"
+        // ═══════════════════════════════════════════════════════════════════
+
+        /**
+         * Regista um comando à espera do novo estado do device/grupo.
+         * Cada entrada expira ao fim de node.pendingTimeoutMs (30 s) se o device não responder.
+         * @returns {Object} entry (para poder ser removida se o publish falhar)
+         */
+        registerPendingOutput(message, target, toSend) {
+            let node = this;
+
+            const entry = {
+                topic: target.stateTopic,
+                target: target,
+                endpoint: target.endpoint,
+                props: deriveExpectedProps(toSend),
+                msg: RED.util.cloneMessage(message), // snapshot: a msg original continua o seu caminho
+                sentAt: Date.now(),
+                timer: null
+            };
+
+            let queue = node.pendingOutputs.get(entry.topic) || [];
+            while (queue.length >= MAX_PENDING_PER_TOPIC) {
+                const dropped = queue.shift();
+                clearTimeout(dropped.timer);
+                node.debug('Pending output queue full for ' + entry.topic + ' - dropping the oldest request');
+            }
+            queue.push(entry);
+            node.pendingOutputs.set(entry.topic, queue);
+
+            entry.timer = setTimeout(function () {
+                if (node.removePendingOutput(entry)) {
+                    node.debug('No state update from ' + entry.topic + ' within ' + (node.pendingTimeoutMs / 1000) + 's - discarding the pending output');
+                }
+            }, node.pendingTimeoutMs);
+
+            return entry;
+        }
+
+        /** Remove (e cancela o timeout de) uma entrada pendente. @returns {boolean} true se existia */
+        removePendingOutput(entry) {
+            let node = this;
+            if (!entry) return false;
+
+            clearTimeout(entry.timer);
+
+            const queue = node.pendingOutputs.get(entry.topic);
+            if (!queue) return false;
+
+            const idx = queue.indexOf(entry);
+            if (idx < 0) return false;
+
+            queue.splice(idx, 1);
+            if (!queue.length) node.pendingOutputs.delete(entry.topic);
+            return true;
+        }
+
+        /** Cancela todos os timeouts e limpa os pedidos pendentes */
+        flushPendingOutputs() {
+            let node = this;
+            node.pendingOutputs.forEach(function (queue) {
+                queue.forEach(function (entry) { clearTimeout(entry.timer); });
+            });
+            node.pendingOutputs.clear();
+        }
+
+        /**
+         * A atualização de estado serve de resposta ao comando?
+         * Se o comando enviou propriedades conhecidas (state, brightness, ...), o estado
+         * publicado tem de conter pelo menos uma delas (ou a variante _<endpoint>, ex.: state_left).
+         * Isto evita fechar o pedido com um relatório não relacionado (linkquality, temperatura, ...).
+         */
+        isResponseFor(entry, payload) {
+            if (!payload || typeof payload !== 'object') return false;
+            if (!entry.props.length) return true;
+            return entry.props.some(function (prop) {
+                return (prop in payload) || (entry.endpoint && ((prop + '_' + entry.endpoint) in payload));
+            });
+        }
+
+        /**
+         * Listener de 'onMQTTMessage' do servidor: estado publicado pelo Zigbee2MQTT
+         * ({topic, payload, item, retained}). Só trata mensagens "ao vivo" de tópicos com pedidos pendentes.
+         */
+        onMQTTMessage(data) {
+            let node = this;
+
+            if (!node.pendingOutputs.size) return;          // caminho rápido: nada à espera
+            if (!data || data.retained) return;             // retained = replay do broker, não é resposta
+
+            const queue = node.pendingOutputs.get(data.topic);
+            if (!queue || !queue.length) return;
+
+            // FIFO: resolve o pedido mais antigo que corresponda a esta atualização
+            const idx = queue.findIndex(function (entry) { return node.isResponseFor(entry, data.payload); });
+            if (idx < 0) return;
+
+            const entry = queue[idx];
+            node.removePendingOutput(entry);                // limpa o timeout e remove do Map
+
+            const item = data.item || node.server.getDeviceOrGroupByKey(entry.target.friendly_name);
+            // current_values = estado acumulado (o servidor já fez o merge antes de emitir)
+            const state = (item && item.current_values) ? item.current_values : data.payload;
+
+            const out = entry.msg;
+            if ('payload' in out) {
+                out.payload_in = out.payload;
+            }
+            out.topic = data.topic;
+            out.payload = state;
+            out.payload_raw = state;
+            out.homekit = item ? item.homekit : null;
+            out.format = item ? item.format : null;
+            out.selector = Zigbee2mqttHelper.generateSelector(data.topic);
+            out.item = item;
+
+            node.send(out);
+        }
+
         onMQTTConnect() {
             let node = this;
             node.status({
@@ -515,6 +839,8 @@ module.exports = function(RED) {
 
         onConnectError() {
             let node = this;
+            // sem ligação não há resposta possível: não deixar pedidos "pendurados"
+            node.flushPendingOutputs();
             node.status({
                 fill: "red",
                 shape: "dot",
@@ -537,6 +863,10 @@ module.exports = function(RED) {
 
         onClose() {
             let node = this;
+
+            clearTimeout(node.cleanTimer);
+            node.flushPendingOutputs();
+
             if (node.server) {
                 if (node.listener_onMQTTConnect) {
                     node.server.removeListener('onMQTTConnect', node.listener_onMQTTConnect);
@@ -546,6 +876,9 @@ module.exports = function(RED) {
                 }
                 if (node.listener_onMQTTBridgeState) {
                     node.server.removeListener('onMQTTBridgeState', node.listener_onMQTTBridgeState);
+                }
+                if (node.listener_onMQTTMessage) {
+                    node.server.removeListener('onMQTTMessage', node.listener_onMQTTMessage);
                 }
             }
         }
@@ -612,3 +945,6 @@ module.exports = function(RED) {
 
     RED.nodes.registerType('zigbee2mqtt-eb-out', Zigbee2mqttNodeOut);
 };
+
+// Exposto apenas para testes unitários (o Node-RED ignora propriedades extra do módulo)
+module.exports.resolveDeviceTarget = resolveDeviceTarget;
