@@ -8,7 +8,10 @@ const Z2MLogger = require('../resources/js/node-red-contrib-zigbee2mqtt-logger.j
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** Tempo máximo (ms) à espera que o Zigbee2MQTT publique o novo estado após um comando */
-const PENDING_OUTPUT_TIMEOUT_MS = 30 * 1000;
+const OUTPUT_STATE_TIMEOUT = 30_000;
+
+/** Alias mantido: o resto do ficheiro (node.pendingTimeoutMs) continua a usar este nome */
+const PENDING_OUTPUT_TIMEOUT_MS = OUTPUT_STATE_TIMEOUT;
 
 /** Proteção de memória: máximo de comandos em espera por tópico de estado */
 const MAX_PENDING_PER_TOPIC = 20;
@@ -896,10 +899,14 @@ module.exports = function(RED) {
 
             // FIFO: resolve o pedido mais antigo que corresponda a esta atualização
             const idx = queue.findIndex(function (entry) { return node.isResponseFor(entry, data.payload); });
-            if (idx < 0) return;
+            if (idx < 0) {
+                node.logger.debug('State update from ' + data.topic + ' ignored: it does not contain any of [' + queue[0].props.join(', ') + ']');
+                return;
+            }
 
             const entry = queue[idx];
             node.removePendingOutput(entry);                // limpa o timeout e remove do Map
+            node.logger.debug('State confirmed for ' + data.topic + ' after ' + (Date.now() - entry.sentAt) + 'ms (expected: ' + (entry.props.length ? entry.props.join(', ') : 'any') + ')');
 
             const item = data.item || node.server.getDeviceOrGroupByKey(entry.target.friendly_name);
             // current_values = estado acumulado (o servidor já fez o merge antes de emitir)
