@@ -922,6 +922,49 @@ module.exports = function(RED) {
             return out;
         }
 
+        /** v3.3.9 - string legada / array / null -> array limpo (vazio = sem filtro). Alias de normalizeList. */
+        parseFilterProperties(value) {
+            return this.normalizeList(value);
+        }
+
+        /**
+         * v3.3.9 - Das propriedades escolhidas em filterProperties, devolve APENAS as que vêm
+         * no payload MQTT BRUTO (o que o Z2M acabou de publicar), ignorando o que só existe
+         * na cache fundida (current_values). "homekit_<x>" avalia-se com payload2homekit(rawPayload).
+         */
+        selectFilterProperties(rawPayload, filterProperties) {
+            const props = this.parseFilterProperties(filterProperties);
+            if (!props.length || !rawPayload || typeof rawPayload !== 'object') return [];
+            let rawHomekit = null;
+            const present = [];
+            props.forEach(function (prop) {
+                if (prop.indexOf('homekit_') === 0) {
+                    if (rawHomekit === null) rawHomekit = Zigbee2mqttHelper.payload2homekit(rawPayload) || {};
+                    if (prop.slice('homekit_'.length) in rawHomekit) present.push(prop);
+                } else if (prop in rawPayload) {
+                    present.push(prop);
+                }
+            });
+            return present;
+        }
+
+        /**
+         * v3.3.9 - Compara `values` ({prop: valor}) com o último valor guardado para `scope`
+         * ('_' no modo single; ieee_address/id no modo multiple) e guarda os novos.
+         * node.last_filter_value passou de string para objeto { scope: { prop: valorSerializado } }.
+         * @returns {boolean} true se pelo menos uma chave mudou (ou é vista pela 1ª vez)
+         */
+        compareAndStoreFilter(node, scope, values) {
+            if (!node.last_filter_value || typeof node.last_filter_value !== 'object') node.last_filter_value = {};
+            const slot = node.last_filter_value[scope] || (node.last_filter_value[scope] = {});
+            let changed = false;
+            Object.keys(values || {}).forEach(function (prop) {
+                const serialized = JSON.stringify(values[prop]);
+                if (slot[prop] !== serialized) { slot[prop] = serialized; changed = true; }
+            });
+            return changed;
+        }
+
         /** Versão para o modo "Multiple input": uma entrada por device, serializada */
         getMultipleComparison(payload, filterProperties) {
             const that = this;
@@ -1362,7 +1405,7 @@ module.exports = function(RED) {
                 // v3.1.0: semear também a comparação granular (filterProperties)
                 const seedProps = this.normalizeList(opts.filterProperties);
                 if (seedProps.length) {
-                    node.last_filter_value = JSON.stringify(this.getComparisonValue(payload_all, seedProps, item.homekit));
+                    this.compareAndStoreFilter(node, '_', this.getComparisonValue(payload_all, seedProps, item.homekit));
                 }
                 (node.logger || this.logger).debug('[Z2M] Message suppressed: retained message during startup window');
                 return;
@@ -1372,12 +1415,21 @@ module.exports = function(RED) {
             // Substitui a comparação do payload completo (opts.filter) quando há propriedades escolhidas.
             const filterProps = this.normalizeList(opts.filterProperties);
             if (filterProps.length && opts.node_send) {
-                const comparison = JSON.stringify(this.getComparisonValue(payload_all, filterProps, item.homekit));
-                if (node.last_filter_value !== undefined && node.last_filter_value === comparison) {
-                    (node.logger || this.logger).debug('[Z2M] Message filtered: no changes detected in selected properties');
+                // v3.3.9: só contam as chaves que vieram REALMENTE na mensagem MQTT (rawPayload);
+                // sem rawPayload (chamador antigo) usa todas as chaves escolhidas.
+                const rawPresent = (opts.rawPayload && typeof opts.rawPayload === 'object')
+                    ? this.selectFilterProperties(opts.rawPayload, filterProps)
+                    : filterProps;
+                if (!rawPresent.length) {
+                    (node.logger || this.logger).debug('[Z2M] Message filtered: none of the selected properties [' + filterProps.join(', ') + '] is in the raw payload');
                     return;
                 }
-                node.last_filter_value = comparison;
+                const currentGranular = this.getComparisonValue(payload_all, rawPresent, item.homekit);
+                if (!this.compareAndStoreFilter(node, '_', currentGranular)) {
+                    (node.logger || this.logger).debug('[Z2M] Message filtered: no change in [' + rawPresent.join(', ') + ']');
+                    return;
+                }
+                (node.logger || this.logger).debug('[Z2M] Granular filtering: comparing ' + rawPresent.join(', ') + ' -> changed');
                 opts.filter = false; // já tratado de forma granular
             }
 
@@ -1504,7 +1556,11 @@ module.exports = function(RED) {
                 // v3.1.0: semear também a comparação granular (filterProperties)
                 const seedPropsMulti = that.normalizeList(opts.filterProperties);
                 if (seedPropsMulti.length) {
-                    node.last_filter_value = that.getMultipleComparison(payload, seedPropsMulti);
+                    Object.keys(payload).forEach(function (k) {
+                        const entry = payload[k] || {};
+                        const scopeId = entry.item ? String(entry.item.ieee_address !== undefined ? entry.item.ieee_address : entry.item.id) : String(k);
+                        that.compareAndStoreFilter(node, scopeId, that.getComparisonValue(entry.payload, seedPropsMulti, entry.homekit));
+                    });
                 }
                 (node.logger || that.logger).debug('[Z2M] Message suppressed: retained message during startup window');
                 return;
@@ -1513,12 +1569,36 @@ module.exports = function(RED) {
             // ── v3.1.0: comparação granular no modo "Multiple input" ──
             const filterPropsMulti = that.normalizeList(opts.filterProperties);
             if (filterPropsMulti.length && opts.node_send) {
-                const comparisonMulti = that.getMultipleComparison(payload, filterPropsMulti);
-                if (node.last_filter_value !== undefined && node.last_filter_value === comparisonMulti) {
-                    (node.logger || that.logger).debug('[Z2M] Message filtered: no changes detected in selected properties');
-                    return;
+                const changedMsg = opts.changed;                                   // {topic, payload(bruto), item, retained}
+                const changedItem = changedMsg && changedMsg.item;
+                const rawMulti = opts.rawPayload || (changedMsg && changedMsg.payload);
+
+                if (changedItem && rawMulti && typeof rawMulti === 'object') {
+                    const scopeId = String(changedItem.ieee_address !== undefined ? changedItem.ieee_address : changedItem.id);
+                    const rawPresentMulti = that.selectFilterProperties(rawMulti, filterPropsMulti);
+                    if (!rawPresentMulti.length) {
+                        (node.logger || that.logger).debug('[Z2M] Message filtered: none of the selected properties is in the raw payload of ' + scopeId);
+                        return;
+                    }
+                    const matchKey = Object.keys(payload).find(function (k) {
+                        const it = payload[k] && payload[k].item;
+                        return it && String(it.ieee_address !== undefined ? it.ieee_address : it.id) === scopeId;
+                    });
+                    const entryMulti = matchKey !== undefined ? payload[matchKey] : null;
+                    const currentMulti = entryMulti ? that.getComparisonValue(entryMulti.payload, rawPresentMulti, entryMulti.homekit) : {};
+                    if (!that.compareAndStoreFilter(node, scopeId, currentMulti)) {
+                        (node.logger || that.logger).debug('[Z2M] Message filtered: no change in [' + rawPresentMulti.join(', ') + '] of ' + scopeId);
+                        return;
+                    }
+                } else {
+                    // sem payload bruto: comportamento anterior (comparação serializada)
+                    const comparisonMulti = that.getMultipleComparison(payload, filterPropsMulti);
+                    if (node.last_filter_value_legacy !== undefined && node.last_filter_value_legacy === comparisonMulti) {
+                        (node.logger || that.logger).debug('[Z2M] Message filtered: no changes detected in selected properties');
+                        return;
+                    }
+                    node.last_filter_value_legacy = comparisonMulti;
                 }
-                node.last_filter_value = comparisonMulti;
             }
             //
             // if (opts.filter) {
