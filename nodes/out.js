@@ -215,6 +215,12 @@ module.exports = function(RED) {
 
             // ── Saída opcional "updated state" ───────────────────────────────
             node.outputEnabled = (config.outputEnabled === true || config.outputEnabled === 'true');
+            // Tolerância: flows exportados/editados onde só o nº de portas ("outputs") ficou gravado
+            if (!node.outputEnabled && parseInt(config.outputs, 10) > 0) {
+                node.outputEnabled = true;
+                node.logger.debug('Output port enabled from config.outputs=' + config.outputs + ' (outputEnabled flag was missing)');
+            }
+            node.logger.debug('Output port "updated state": ' + (node.outputEnabled ? 'ENABLED (1 output)' : 'disabled (0 outputs)'));
             node.pendingOutputs = new Map();                   // stateTopic -> [entry, entry, ...] (FIFO)
             node.pendingTimeoutMs = PENDING_OUTPUT_TIMEOUT_MS; // 30 s
 
@@ -814,6 +820,10 @@ module.exports = function(RED) {
          */
         registerPendingOutput(message, target, toSend) {
             let node = this;
+
+            // Guarda: sem porta de saída ativa não há para onde emitir a resposta
+            // (removePendingOutput(null) é seguro, por isso os chamadores não precisam de mudar)
+            if (!node.outputEnabled) return null;
 
             const entry = {
                 topic: target.stateTopic,
