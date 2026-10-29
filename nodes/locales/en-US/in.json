@@ -1,6 +1,7 @@
 {
     "label": {
         "name": "Name",
+        "friendly_name": "Friendly name",
         "server": "Server",
         "topic": "Device",
         "state": "Payload output",
@@ -22,7 +23,8 @@
         "expose_to_home_assistant_help": "Expose to Home Assistant (MQTT Discovery, with an enabled switch)"
     },
     "placeholder": {
-        "name": "Name"
+        "name": "Name",
+        "friendly_name": "Friendly name"
     },
     "status": {
         "no_server": "no server",
