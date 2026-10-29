@@ -2,9 +2,11 @@
 // (v3.1.0: the "in" node now has its own logger, so debug messages of the filter / Home Assistant
 //  logic are written with node.logger.debug() and follow the "Log Node Red" level of the server node)
 const Z2MLogger = require('../resources/js/node-red-contrib-zigbee2mqtt-logger.js').Logger;
+// Home Assistant: ciclo de vida do nó (fila de mensagens pendentes, estado enabled/disabled, registo no servidor)
+const HAHelper = require('../resources/js/node-red-contrib-zigbee2mqtt-homeassistant.js');
 
 /** Proteção de memória: máximo de mensagens em fila enquanto o estado "enabled" do Home Assistant não é conhecido */
-const HA_PENDING_MAX_MESSAGES = 20;
+const HA_PENDING_MAX_MESSAGES = HAHelper.DEFAULTS.PENDING_MAX; // valor por defeito mantido no módulo Home Assistant
 
 module.exports = function(RED) {
     class Zigbee2mqttNodeIn {
@@ -32,16 +34,15 @@ module.exports = function(RED) {
             // filterProperties: array de chaves do JSON (ou null). Aceita também uma string legada.
             node.config.filterProperties = node.normalizeFilterProperties(node.config.filterProperties);
             // exposeToHomeAssistant: checkbox (boolean, mas tolera 'true' vindo de flows antigos/importados)
-            node.config.exposeToHomeAssistant = (node.config.exposeToHomeAssistant === true || node.config.exposeToHomeAssistant === 'true');
+            node.config.exposeToHomeAssistant = HAHelper.normalizeExposeFlag(node.config.exposeToHomeAssistant);
 
             // ── v3.1.0: ciclo de vida Home Assistant ──────────────────────────────────────
             // Enquanto o estado "enabled" não for conhecido (o HA responde através do tópico retained
             // do switch), as mensagens ficam em fila. Quando o servidor chama setHomeAssistantState()
             // a fila é reproduzida (ON) ou descartada (OFF).
             // Sem exposeToHomeAssistant o nó comporta-se exatamente como antes (inicializado + ON).
-            node.homeAssistantEnabled = true;
-            node.homeAssistantStateInitialized = !node.config.exposeToHomeAssistant;
-            node.homeAssistantPendingMessages = [];
+            // (campos homeAssistantEnabled / homeAssistantStateInitialized / homeAssistantPendingMessages criados por createHomeAssistantNodeState)
+            node.haState = HAHelper.createHomeAssistantNodeState(node, { max: HA_PENDING_MAX_MESSAGES });
 
             if (node.server) {
                 node.listener_onMQTTAvailability = function(data) { node.onMQTTAvailability(data); }
@@ -60,10 +61,7 @@ module.exports = function(RED) {
                 node.on('close', (removed, done) => { node.onClose(removed); done(); });
 
                 // v3.1.0: registar no servidor para o anúncio (MQTT Discovery) e para o estado enabled/disabled
-                if (node.config.exposeToHomeAssistant && typeof node.server.registerHomeAssistantNode === 'function') {
-                    node.logger.debug('[Z2M] Registering node in the server for Home Assistant exposure');
-                    node.server.registerHomeAssistantNode(node);
-                }
+                node.haState.register();
 
             } else {
                 node.status({
@@ -113,21 +111,8 @@ module.exports = function(RED) {
             let node = this;
 
             // ── v3.1.0: Home Assistant (só se o nó estiver exposto) ────────────────────────
-            if (node.config.exposeToHomeAssistant) {
-                // 1) Estado enabled/disabled ainda desconhecido: guardar para reproduzir depois
-                if (!node.homeAssistantStateInitialized) {
-                    node.homeAssistantPendingMessages.push(data);
-                    while (node.homeAssistantPendingMessages.length > HA_PENDING_MAX_MESSAGES) {
-                        node.homeAssistantPendingMessages.shift(); // proteção de memória: descarta a mais antiga
-                    }
-                    node.logger.debug('[Z2M] Message queued: waiting for the Home Assistant enabled state (' + node.homeAssistantPendingMessages.length + ' pending)');
-                    return;
-                }
-                // 2) Nó desativado através do Home Assistant: descartar
-                if (!node.homeAssistantEnabled) {
-                    node.logger.debug('[Z2M] Message dropped: node is disabled via Home Assistant');
-                    return;
-                }
+            if (node.haState.intercept(data)) {
+                return; // enfileirada (estado do HA ainda desconhecido) ou descartada (nó desativado no HA)
             }
 
             // v3.3.9: payload MQTT BRUTO (só as chaves publicadas nesta mensagem) para a filtragem granular
@@ -169,37 +154,17 @@ module.exports = function(RED) {
          * (mensagem retained do switch, comando do HA, ou fallback ON após o timeout).
          */
         setHomeAssistantState(enabled) {
-            let node = this;
-            const wasInitialized = node.homeAssistantStateInitialized;
-            const wasEnabled = node.homeAssistantEnabled;
+            return this.haState.setState(enabled);
+        }
 
-            node.homeAssistantEnabled = !!enabled;
-            node.homeAssistantStateInitialized = true;
+        /** v3.1.x: descarta da fila as mensagens mais velhas que o TTL (lógica no módulo Home Assistant) */
+        pruneHomeAssistantPending() {
+            return this.haState.prune();
+        }
 
-            if (!wasInitialized || wasEnabled !== node.homeAssistantEnabled) {
-                node.logger.notice('Home Assistant state: node is ' + (node.homeAssistantEnabled ? 'ENABLED' : 'DISABLED'));
-            }
-
-            const pending = node.homeAssistantPendingMessages;
-            node.homeAssistantPendingMessages = [];
-
-            if (node.homeAssistantEnabled) {
-                // repor o último estado conhecido (o "disabled" tinha-o substituído)
-                node.status(node.last_successful_status);
-                if (pending.length) {
-                    node.logger.debug('[Z2M] Replaying ' + pending.length + ' message(s) queued while waiting for the Home Assistant state');
-                    pending.forEach(function (msg) { node.onMQTTMessage(msg); });
-                }
-            } else {
-                if (pending.length) {
-                    node.logger.debug('[Z2M] Message dropped: node is disabled via Home Assistant (' + pending.length + ' queued message(s) discarded)');
-                }
-                node.status({
-                    fill: "grey",
-                    shape: "ring",
-                    text: "disabled (Home Assistant)"
-                });
-            }
+        /** v3.1.x: estado da fila (diagnóstico / testes) */
+        getHomeAssistantQueueStats() {
+            return this.haState.stats();
         }
 
         onMQTTBridgeState(data) {
@@ -237,11 +202,9 @@ module.exports = function(RED) {
                     node.server.removeListener("onMQTTBridgeState", node.listener_onMQTTBridgeState);
                 }
                 // v3.1.0: libertar o registo Home Assistant (se removed=true limpa também o discovery retained)
-                if (node.config.exposeToHomeAssistant && typeof node.server.unregisterHomeAssistantNode === 'function') {
-                    node.server.unregisterHomeAssistantNode(node, !!removed);
-                }
+                node.haState.unregister(removed);
             }
-            node.homeAssistantPendingMessages = [];
+            node.haState.clearPending();
             node.onConnectError();
         }
 
