@@ -112,6 +112,8 @@
             <label for="node-input-outputEnabled" style="width: auto;"><i class="fa fa-share-square"></i> <span data-i18n="label.output_enabled"></span></label>
             <!-- reflete o nº real de saídas (0/1); o Node-RED liga-o a defaults.outputs -->
             <input type="hidden" id="node-input-outputs" value="0">
+            <!-- Estado da porta de saída (atualizado ao vivo quando o toggle muda) -->
+            <div class="form-tips" id="z2m-output-hint" style="margin-top: 6px;"></div>
         </div>
 
         <div class="form-row node-input-rule-container-row">
@@ -246,6 +248,79 @@
                 };
                 $('#node-input-outputEnabled').off('change.z2m_outputs').on('change.z2m_outputs', syncOutputs);
                 syncOutputs();
+
+                // ── LIVE-OUTPUT-BEGIN ─────────────────────────────────────────────────────────
+                // A porta de saída "updated state" é aplicada AO VIVO: assim que o toggle muda, o nó
+                // ganha/perde a porta no canvas (sem esperar pelo "Done").
+                //  - ligar   -> node.outputs = 1 (a porta aparece e já se pode ligar a fios)
+                //  - desligar-> node.outputs = 0 e os fios dessa porta são removidos (esperado)
+                //  - Cancel  -> repõe outputs/outputEnabled/estado "changed" e RESTAURA os fios removidos
+                // Nota: a alteração ao vivo não passa pelo histórico (undo) do Node-RED.
+                const liveOutput = (function () {
+                    const snap = {
+                        outputs: parseInt(node.outputs, 10) || 0,
+                        outputEnabled: node.outputEnabled,
+                        changed: node.changed,
+                        dirty: RED.nodes.dirty(),
+                        removedLinks: []
+                    };
+                    node._z2mOutputSnapshot = snap;
+
+                    const paint = function (text) { $('#z2m-output-hint').text(text); };
+                    const redraw = function () { node.dirty = true; RED.view.redraw(true); };
+
+                    paint(snap.outputs > 0 ? 'Output port enabled (1 output: updated state).' : 'No output port (fire and forget).');
+
+                    return {
+                        apply: function (enabled) {
+                            const wanted = enabled ? 1 : 0;
+                            if ((parseInt(node.outputs, 10) || 0) === wanted) return;
+
+                            if (wanted === 0) {
+                                // remover os fios ligados à porta que vai desaparecer (guardados para o Cancel)
+                                const doomed = [];
+                                RED.nodes.eachLink(function (l) {
+                                    if (l.source === node && (parseInt(l.sourcePort, 10) || 0) >= wanted) doomed.push(l);
+                                });
+                                doomed.forEach(function (l) { RED.nodes.removeLink(l); snap.removedLinks.push(l); });
+                                paint(doomed.length
+                                    ? 'Output port removed: ' + doomed.length + ' wire(s) disconnected (Cancel restores them).'
+                                    : 'Output port removed.');
+                            } else {
+                                // se estes fios foram removidos nesta sessão (off -> on), voltam a ligar-se
+                                snap.removedLinks.forEach(function (l) { RED.nodes.addLink(l); });
+                                const restored = snap.removedLinks.length;
+                                snap.removedLinks = [];
+                                paint(restored
+                                    ? 'Output port enabled again: ' + restored + ' wire(s) restored.'
+                                    : 'Output port added: you can wire it now (Cancel reverts).');
+                            }
+
+                            node.outputs = wanted;
+                            node.outputEnabled = !!enabled;
+                            node.changed = true;
+                            RED.nodes.dirty(true);
+                            redraw();
+                        },
+
+                        cancel: function () {
+                            if ((parseInt(node.outputs, 10) || 0) !== snap.outputs) {
+                                node.outputs = snap.outputs;
+                                snap.removedLinks.forEach(function (l) { RED.nodes.addLink(l); });
+                            }
+                            node.outputEnabled = snap.outputEnabled;
+                            node.changed = snap.changed;
+                            RED.nodes.dirty(snap.dirty);
+                            snap.removedLinks = [];
+                            redraw();
+                        }
+                    };
+                })();
+                node._z2mOutputLive = liveOutput;
+                $('#node-input-outputEnabled').off('change.z2m_live').on('change.z2m_live', function () {
+                    liveOutput.apply($(this).is(':checked'));
+                });
+                // ── LIVE-OUTPUT-END ───────────────────────────────────────────────────────────
                 
                 setTimeout(() => {
                     node.z2mEditor.build().then(() => {
@@ -309,12 +384,26 @@
                 const outputEnabled = $('#node-input-outputEnabled').is(':checked');
                 node.outputEnabled = outputEnabled;
                 node.outputs = outputEnabled ? 1 : 0;
+                // O Node-RED lê #node-input-outputs para "outputs" (defaults) depois do oneditsave:
+                // garantir que o input escondido tem SEMPRE o valor final.
+                $('#node-input-outputs').val(node.outputs);
+                // alterações ao vivo confirmadas: o snapshot do Cancel deixa de ser necessário
+                delete node._z2mOutputSnapshot;
+                delete node._z2mOutputLive;
                 
                 if (d && d.log) 
                     d.log('Saved Node State:', node.command, node.payload);
                 if (d && d.log) 
                     d.log('Saved Output State: outputEnabled=', node.outputEnabled, 'outputs=', node.outputs);
                 return true;
+            },
+            oneditcancel: function() {
+                // repõe a porta de saída (e os fios removidos) se o toggle foi mexido ao vivo
+                if (this._z2mOutputLive) {
+                    this._z2mOutputLive.cancel();
+                    delete this._z2mOutputSnapshot;
+                    delete this._z2mOutputLive;
+                }
             }
 
     });
