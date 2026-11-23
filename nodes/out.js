@@ -297,6 +297,11 @@ module.exports = function(RED) {
                     // ✅ Resolve device OU grupo, e deteta "/set" e endpoints (ex.: left/set)
                     // [ORIGINAL] let device = node.server.getDeviceOrGroupByKey(key);
                     const target = resolveDeviceTarget(node.server, key);
+                    // 👥 v3.4 grupos: diagnóstico do alvo (device, grupo ou endpoint)
+                    node.logger.debug('Target: key=' + JSON.stringify(key) + ' -> '
+                        + (target.found
+                            ? (target.isGroup ? 'GROUP' : 'device') + ' "' + target.friendly_name + '"' + (target.endpoint ? ' endpoint=' + target.endpoint : '')
+                            : 'NOT FOUND'));
                     let device = target.item;
                     
                     if (device) {
@@ -469,6 +474,23 @@ module.exports = function(RED) {
                                             command = null;
                                             break;
                                             
+                                        // 👥 v3.4: color_hsv estava nos composites/sliders do editor mas caía no default e publicava
+                                        // {"color_hsv":"h,s,v"}, que o Z2M ignora
+                                        case 'color_hsv': {
+                                            const hsvParts = String(payload).split(',').map(Number);
+                                            if (hsvParts.length === 3 && hsvParts.every(Number.isFinite)) {
+                                                payload = { color: { h: hsvParts[0], s: hsvParts[1], b: hsvParts[2] } }; // o Z2M trata o "v" como brilho (b)
+                                                command = null;
+                                                node.logger.debug('Command "color_hsv" converted to ' + JSON.stringify(payload));
+                                            } else {
+                                                node.logger.throttle('warn', 'hsv-invalid', 30000, 'Invalid color_hsv value: ' + JSON.stringify(payload));
+                                                node.status({fill: "red", shape: "dot", text: "@evilbunny/node-red-contrib-zigbee2mqtt/out:status.error"});
+                                                sendResult(false);
+                                                return;
+                                            }
+                                            break;
+                                        }
+
                                         case 'color_hue':
                                             payload = {"color": {"hue": parseInt(payload)}};
                                             command = null;
@@ -521,17 +543,23 @@ module.exports = function(RED) {
                                         }
                                         
                                         // v3.1.0: "scene" é um alias interno -> o Z2M só conhece "scene_recall" (payload inteiro)
-                                        case 'scene': {
+                                        // 🎬 v3.4 cenas: o editor passa a oferecer scene_recall diretamente (droplist de cenas do
+                                        //    grupo/dispositivo); o Z2M aceita o id numérico OU o nome da cena
+                                        case 'scene':
+                                        case 'scene_recall': {
                                             const rawScene = payload;
                                             command = 'scene_recall';
-                                            payload = parseInt(payload);
-                                            if (isNaN(payload)) {
-                                                node.logger.throttle('warn', 'scene-nan', 30000,
-                                                    'Invalid scene id: ' + JSON.stringify(rawScene));
+                                            const sceneText = (payload === undefined || payload === null) ? '' : String(payload).trim();
+                                            payload = (sceneText !== '' && /^[0-9]+$/.test(sceneText)) ? parseInt(sceneText, 10) : sceneText;
+                                            if (payload === '') {
+                                                node.logger.throttle('warn', 'scene-empty', 30000,
+                                                    'Invalid scene id/name: ' + JSON.stringify(rawScene));
+                                                node.status({fill: "red", shape: "dot", text: "@evilbunny/node-red-contrib-zigbee2mqtt/out:status.no_payload"});
                                                 sendResult(false);
                                                 return;
                                             }
-                                            node.logger.debug('Command "scene" renamed to "scene_recall" (id ' + payload + ')');
+                                            node.logger.debug('Scene recall: ' + JSON.stringify(rawScene) + ' -> ' + JSON.stringify(payload)
+                                                + ' on ' + (target.isGroup ? 'GROUP' : 'device') + ' "' + (target.friendly_name || key) + '"');
                                             break;
                                         }
 
