@@ -703,15 +703,31 @@ class Zigbee2MqttEditor {
         groups.sort(function(a, b) {
             return (a.friendly_name || '').localeCompare(b.friendly_name || '', undefined, {sensitivity: 'base'});
         });
+        // 👥 v3.4 grupos: no nó out só aparecem grupos com comandos ou cenas (nunca se esconde o já guardado nem grupos incompletos)
+        if (that.config.mode === 'out') {
+            const keepIds = (Array.isArray(that.device_id) ? that.device_id : [that.device_id]).map(String);
+            const groupsBefore = groups.length;
+            groups = groups.filter(function(g) {
+                return keepIds.indexOf(String(g.id)) >= 0
+                    || (g.definition && g.definition.partial)
+                    || Zigbee2MqttEditorUtils.filterDevicesByMode([g], 'out').length > 0
+                    || that.getScenes(g).length > 0;
+            });
+            that.debug.log('|     [buildDeviceIdInput OUT] Groups with commands/scenes:', groups.length, 'of', groupsBefore);
+        }
         if (groups.length) {
             html = $('<optgroup/>', {label: Z2MI18n.t('server:editor.groups')});
             html.appendTo(that.getDeviceIdInput());
             $.each(groups, function(index, value) {
                 let text = '';
-                if ("devices" in value && typeof (value.devices) != 'undefined' && value.devices.length > 0) {
-                    text = ' (' + value.devices.length + ')';
+                // 👥 v3.4 grupos: um grupo tem "members" (não "devices"): o contador nunca aparecia
+                const memberCount = Array.isArray(value.members) ? value.members.length : 0;
+                const sceneCount = that.getScenes(value).length;
+                if (memberCount > 0) {
+                    text = ' (' + memberCount + (sceneCount ? ', ' + sceneCount + ' ' + Z2MI18n.t('server:editor.scenes', null, 'scenes') : '') + ')';
                 }
-                $('<option value="' + value.id + '" data-friendly_name="' + value.friendly_name + '">' + value.friendly_name + text + '</option>')
+                // 👥 v3.4: sem concatenar HTML (nomes com aspas ou < partiam a lista)
+                $('<option>', { value: value.id, 'data-friendly_name': value.friendly_name, text: value.friendly_name + text })
                     .appendTo(html);
             });
         }
@@ -751,7 +767,7 @@ class Zigbee2MqttEditor {
             // Adicionar os devices filtrados
             $.each(filteredDevices, function(index, value) {
                 var model = '';
-                if ("definition" in value && value.definition && "model" in value.definition && typeof (value.definition.model) !== undefined) {
+                if ("definition" in value && value.definition && "model" in value.definition && typeof (value.definition.model) !== 'undefined') {
                     model = ' (' + value.definition.model + ')';
                 }
                 $('<option>', { 
@@ -830,6 +846,11 @@ class Zigbee2MqttEditor {
             let common = [['last_seen', 'last_seen'], ['linkquality', 'linkquality, lqi']].filter(function(c) {
                 return !that.getDevicePropertyInput().find('option[value="' + c[0] + '"]').length;
             });
+            // 👥 v3.4 grupos: um grupo não tem last_seen / linkquality
+            if (device.definition && device.definition.synthetic) {
+                common = [];
+                that.debug.log('|     👥 group: common attributes (last_seen/linkquality) skipped');
+            }
             if (common.length) {
                 html = $('<optgroup/>', {label: Z2MI18n.t('server:editor.common')});
                 html.appendTo(that.getDevicePropertyInput());
@@ -901,14 +922,18 @@ class Zigbee2MqttEditor {
 
     /**
      * Devolve os devices atualmente selecionados (1 no modo simples, N no modo múltiplo).
+     * 👥 v3.4 grupos: inclui também os GRUPOS selecionados (o id do grupo compara-se como string).
      * @returns {Array<Object>}
      */
     getSelectedDevicesForFilter() {
         let that = this;
-        const list = (that.devices && Array.isArray(that.devices[0])) ? that.devices[0] : [];
+        const data = that.devices || [[], []];
+        const list = [].concat(Array.isArray(data[0]) ? data[0] : [], Array.isArray(data[1]) ? data[1] : []);
         if (!list.length || !that.device_id) return [];
-        const ids = Array.isArray(that.device_id) ? that.device_id : [that.device_id];
-        return list.filter(function (item) { return ids.indexOf(item.ieee_address) >= 0; });
+        const ids = (Array.isArray(that.device_id) ? that.device_id : [that.device_id]).map(String);
+        return list.filter(function (item) {
+            return ids.indexOf(String(item.ieee_address !== undefined ? item.ieee_address : item.id)) >= 0;
+        });
     }
 
     /**
@@ -1123,6 +1148,13 @@ class Zigbee2MqttEditor {
             };
 
             addCommandsFromExposes(device.definition.exposes);
+        }
+
+        // 🎬 v3.4 cenas: scene_recall não existe nos exposes do Z2M; oferece-se quando o device/grupo tem cenas
+        if (device && that.deviceHasScenes()) {
+            $('<option/>', { value: 'scene_recall', text: Z2MI18n.t('server:editor.scene_recall', null, 'scene_recall') }).appendTo($commandList);
+            commandsCount++;
+            that.debug.log('|     🎬 scene_recall added (' + that.getScenes(device).length + ' scene(s))');
         }
 
         if (commandsCount === 0) {
@@ -1417,6 +1449,8 @@ class Zigbee2MqttEditor {
         const config = window.Z2MConfig;
         
         if (currentCommandType === 'z2m_cmd' && currentCommand) {
+            // 🎬 v3.4 cenas: droplist de cenas (value = id da cena, label = "Nome (id)")
+            const sceneOptions = (currentCommand === 'scene_recall') ? that.getSceneOptions() : [];
             const droplistFromConfig = config?.getPayloadDroplist(currentCommand);
 
             // Prefer the values the device itself declares for this property (binary
@@ -1438,7 +1472,11 @@ class Zigbee2MqttEditor {
                 }
             }
 
-            if (deviceValues.length) {
+            if (sceneOptions.length) {
+                z2mPayloadOptions = sceneOptions;
+                that.debug.log('|     🎬 payload options = scenes:', sceneOptions.length);
+            }
+            else if (deviceValues.length) {
                 z2mPayloadOptions = deviceValues;
             }
             else if (config?.isToggleable(currentCommand) || config?.matchesPattern(currentCommand, 'state')) {
@@ -1991,6 +2029,7 @@ class Zigbee2MqttEditor {
     }
     /**
      * Verifica se device SELECIONADO tem comandos (propriedades com SET)
+     * 🎬 v3.4: um grupo/dispositivo com CENAS também conta (scene_recall não é um expose)
      * @returns {boolean}
      */
     deviceHasCommands() {
@@ -2000,10 +2039,12 @@ class Zigbee2MqttEditor {
         
         // verbose:true -> mantém os logs "No device selected / No device.definition /
         // No device.definition.exposes" e os ❌ READ ONLY de cada expose
-        const hasWritableExposes = Zigbee2MqttEditorUtils.deviceHasCommands(that.getDevice(), { verbose: true });
+        const selectedDevice = that.getDevice();
+        const hasWritableExposes = Zigbee2MqttEditorUtils.deviceHasCommands(selectedDevice, { verbose: true });
+        const hasScenes = !!selectedDevice && that.getScenes(selectedDevice).length > 0;
         
-        that.debug.log('✅ [deviceHasCommands] Result:', hasWritableExposes);
-        return hasWritableExposes;
+        that.debug.log('✅ [deviceHasCommands] Result:', hasWritableExposes, '| scenes:', hasScenes);
+        return hasWritableExposes || hasScenes;
     }
 	/**
      * Verifica se um device ESPECÍFICO tem comandos
@@ -2355,6 +2396,8 @@ class Zigbee2MqttEditor {
     // ═══════════════════════════════════════════════════════════════════════
     /**
      * Obtém lista de devices e groups do servidor
+     * 👥 v3.4 grupos: os grupos chegam do servidor SEM definition.exposes (o Z2M não os publica);
+     *     enrichDevicesData() acrescenta-os para que comandos, payload e propriedades funcionem nos grupos.
      * @returns {Promise<Array>} - [devices, groups]
      */
     async getDevices() {
@@ -2369,7 +2412,7 @@ class Zigbee2MqttEditor {
             try {
                 const local = localStorage.getItem(cacheKey);
                 if (local) {
-                    that.devices = JSON.parse(local);
+                    that.devices = that.enrichDevicesData(JSON.parse(local));
                     that.debug.log('⚡ UI Caching: Instant load from LocalStorage');
                     // Não fazemos return aqui para permitir que o fetch atualize os dados em background
                 }
@@ -2388,26 +2431,223 @@ class Zigbee2MqttEditor {
             if (!response.ok) throw new Error('API Offline');
             
             that.refresh = false;
-            that.devices = await response.json();
-            window.Z2M_DEVICES_CACHE = that.devices;
+            that.devices = that.enrichDevicesData(await response.json());
+            // 👥 v3.4: cache por servidor (antes era uma variável global única) e escrita no localStorage (antes só era lida)
+            window.Z2M_DEVICES_CACHE = window.Z2M_DEVICES_CACHE || {};
+            window.Z2M_DEVICES_CACHE[cacheKey] = that.devices;
+            try { localStorage.setItem(cacheKey, JSON.stringify(that.devices)); } catch (e) {}
             return that.devices;
         } catch (err) {
             that.debug.warn('Using offline cache due to fetch error:', err.message);
-            if (window.Z2M_DEVICES_CACHE) {
-                that.devices = window.Z2M_DEVICES_CACHE;
+            if (window.Z2M_DEVICES_CACHE && window.Z2M_DEVICES_CACHE[cacheKey]) {
+                that.devices = window.Z2M_DEVICES_CACHE[cacheKey];
                 return that.devices;
+            }
+            if (that.devices) {
+                return that.devices; // veio do localStorage
             }
             return [[], []];
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // 👥 GRUPOS E CENAS
+    // O Zigbee2MQTT publica os grupos (bridge/groups) SEM definition.exposes e as cenas não são exposes
+    // de ninguém. Aqui calculam-se os exposes de um grupo (interseção dos membros) para que o resto do
+    // editor trate um grupo como qualquer dispositivo, e oferecem-se as cenas como comando scene_recall.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Exposes de um grupo = interseção dos exposes escrevíveis (SET) dos membros.
+     *  - containers (light, switch, cover...) são achatados; "composite" (color_xy...) fica como unidade
+     *  - chave de identidade "type:name"; endpoints normalizam-se (state_l1 / state_l2 -> state)
+     *  - access = AND; value_min = max(mins); value_max = min(maxs); values / presets = interseção
+     *  - membros ainda sem device/definition são ignorados e o grupo fica partial = true
+     * @returns {{exposes: Array, resolved: number, total: number, partial: boolean}}
+     */
+    groupComputeExposes(group, devices) {
+        const that = this;
+        const SET = 2; // = Zigbee2MqttEditorUtils.ACCESS.SET
+        const arr = function (v) { return Array.isArray(v) ? v : []; };
+        const clone = function (v) { return JSON.parse(JSON.stringify(v)); };
+        const isNum = function (v) { return typeof v === 'number' && isFinite(v); };
+        const hasSet = function (a) { return ((Number(a) || 0) & SET) > 0; };
+        const keyOf = function (e) { return String(e.type || '') + ':' + String(e.name || e.property || ''); };
+
+        const leaves = function walk(list, out) {
+            arr(list).forEach(function (e) {
+                if (!e || typeof e !== 'object') return;
+                if (Array.isArray(e.features) && e.type !== 'composite') walk(e.features, out);
+                else out.push(e);
+            });
+            return out;
+        };
+        const normalize = function norm(e) {
+            const c = clone(e);
+            if (c.endpoint) {
+                const suffix = '_' + c.endpoint;
+                if (typeof c.property === 'string' && c.property.slice(-suffix.length) === suffix) {
+                    c.property = c.property.slice(0, -suffix.length);
+                }
+                delete c.endpoint;
+            }
+            if (Array.isArray(c.features)) c.features = c.features.map(norm);
+            return c;
+        };
+        const settable = function (device) {
+            const seen = Object.create(null);
+            const out = [];
+            leaves(device.definition.exposes, []).forEach(function (l) {
+                if (!hasSet(l.access)) return;
+                const n = normalize(l);
+                const k = keyOf(n);
+                if (!k || seen[k]) return;
+                seen[k] = true;
+                out.push(n);
+            });
+            return out;
+        };
+        const merge = function (a, b) {
+            const m = clone(a);
+            m.access = (Number(a.access) || 0) & (Number(b.access) || 0);
+            if (!hasSet(m.access)) return null;
+            if (Array.isArray(a.features) || Array.isArray(b.features)) {
+                m.features = intersect(arr(a.features), arr(b.features));
+                return m.features.length ? m : null;
+            }
+            if (a.type === 'numeric') {
+                const mins = [a.value_min, b.value_min].filter(isNum);
+                const maxs = [a.value_max, b.value_max].filter(isNum);
+                const steps = [a.value_step, b.value_step].filter(isNum);
+                if (mins.length) m.value_min = Math.max.apply(null, mins);
+                if (maxs.length) m.value_max = Math.min.apply(null, maxs);
+                if (mins.length && maxs.length && m.value_min > m.value_max) return null;
+                if (steps.length) m.value_step = Math.max.apply(null, steps);
+                if (Array.isArray(a.presets)) {
+                    m.presets = a.presets.filter(function (p) {
+                        return arr(b.presets).some(function (q) { return q.name === p.name && q.value === p.value; });
+                    });
+                    if (!m.presets.length) delete m.presets;
+                }
+            }
+            if (Array.isArray(a.values)) {
+                m.values = a.values.filter(function (v) { return arr(b.values).indexOf(v) >= 0; });
+                if (!m.values.length) return null;
+            }
+            return m;
+        };
+        const intersect = function (listA, listB) {
+            const out = [];
+            listA.forEach(function (a) {
+                const b = listB.find(function (x) { return keyOf(x) === keyOf(a); });
+                const m = b ? merge(a, b) : null;
+                if (m) out.push(m);
+            });
+            return out;
+        };
+
+        const members = arr(group && group.members);
+        const byIeee = new Map();
+        arr(devices).forEach(function (d) { if (d && d.ieee_address) byIeee.set(String(d.ieee_address), d); });
+        let acc = null;
+        let resolved = 0;
+        members.forEach(function (member) {
+            const dev = member && byIeee.get(String(member.ieee_address));
+            if (!dev || !dev.definition || !Array.isArray(dev.definition.exposes)) {
+                that.debug.log('|     👥 [groupComputeExposes] member', member && member.ieee_address, 'not resolved (no device/definition)');
+                return;
+            }
+            resolved++;
+            // o nome do endpoint do membro (number) não é mapeável de forma fiável a partir de
+            // bridge/devices, por isso consideram-se todos os exposes do dispositivo
+            const l = settable(dev);
+            acc = (acc === null) ? l : intersect(acc, l);
+        });
+        const result = { exposes: acc || [], resolved: resolved, total: members.length, partial: resolved < members.length };
+        that.debug.log('|     👥 [groupComputeExposes] "' + (group && (group.friendly_name || group.id)) + '" (id ' + (group && group.id) + '):',
+            resolved + '/' + members.length, 'member(s) resolved -> [' + result.exposes.map(function (e) { return e.name || e.property; }).join(', ') + ']',
+            result.partial ? 'PARTIAL' : '');
+        return result;
+    }
+
+    /**
+     * [devices, groups] -> [devices, groups com definition.exposes sintético].
+     * Idempotente: grupos que já tenham definition (versões futuras do Z2M) não são recalculados.
+     */
+    enrichDevicesData(data) {
+        const that = this;
+        if (!Array.isArray(data)) return data;
+        const devices = Array.isArray(data[0]) ? data[0] : [];
+        const groups = Array.isArray(data[1]) ? data[1] : [];
+        const enriched = groups.map(function (g) {
+            if (!g || typeof g !== 'object') return g;
+            if (g.definition && Array.isArray(g.definition.exposes)) return g;
+            const r = that.groupComputeExposes(g, devices);
+            return Object.assign({}, g, { definition: {
+                model: 'Group', vendor: 'Zigbee2MQTT', description: g.description || '',
+                exposes: r.exposes, synthetic: true, partial: r.partial
+            } });
+        });
+        that.debug.log('👥 [enrichDevicesData]', devices.length, 'devices,', enriched.length, 'groups with exposes');
+        return [devices, enriched];
+    }
+
+    /** O item é um grupo? (os dispositivos têm ieee_address; os grupos só têm id) */
+    isGroupItem(item) {
+        return !!item && typeof item === 'object' && !item.ieee_address && item.id !== undefined && item.id !== null;
+    }
+
+    /**
+     * Cenas de um grupo (group.scenes) ou de um dispositivo (device.endpoints[*].scenes).
+     * Sem argumento usa o device/grupo selecionado.
+     * @returns {Array<{id:number|string, name:string}>} ordenadas por id, sem repetidos
+     */
+    getScenes(item) {
+        const target = (item === undefined) ? this.getDevice() : item;
+        if (!target || typeof target !== 'object') return [];
+        let raw = [];
+        if (!target.ieee_address) {
+            raw = Array.isArray(target.scenes) ? target.scenes : [];
+        } else {
+            const eps = (target.endpoints && typeof target.endpoints === 'object') ? target.endpoints : {};
+            Object.keys(eps).forEach(function (k) {
+                if (eps[k] && Array.isArray(eps[k].scenes)) raw = raw.concat(eps[k].scenes);
+            });
+        }
+        const seen = Object.create(null);
+        const out = [];
+        raw.forEach(function (s) {
+            if (!s || s.id === undefined || s.id === null || seen[String(s.id)]) return;
+            seen[String(s.id)] = true;
+            out.push({ id: s.id, name: s.name ? String(s.name) : '' });
+        });
+        return out.sort(function (a, b) { return Number(a.id) - Number(b.id); });
+    }
+
+    deviceHasScenes() {
+        return this.getScenes().length > 0;
+    }
+
+    /** Opções { value, label } para a droplist do payload quando o comando é scene_recall. */
+    getSceneOptions() {
+        const options = this.getScenes().map(function (s) {
+            return { value: String(s.id), label: s.name ? s.name + ' (' + s.id + ')' : String(s.id) };
+        });
+        this.debug.log('🎬 [getSceneOptions]', options.length, 'scene(s)');
+        return options;
+    }
+
     /**
      * Obtém device atualmente selecionado
+     * 👥 v3.4 grupos: devolve também GRUPOS (o id de um grupo é guardado como string no editor
+     *     e publicado como número pelo Z2M, por isso compara-se como string)
      * @returns {Object|null} - Device object ou null
      */
     getDevice() {
         let that = this;
-        let devices = that.devices[0];
+        // 👥 v3.4: protege contra devices ainda por carregar (antes: that.devices[0] com that.devices = null rebentava)
+        if (!Array.isArray(that.devices)) return null;
+        let devices = Array.isArray(that.devices[0]) ? that.devices[0] : [];
         let device = null;
 
         if (devices.length && that.device_id) {
@@ -2418,6 +2658,18 @@ class Zigbee2MqttEditor {
                     return false;
                 }
             });
+        }
+
+        // 👥 v3.4 grupos: se não é um dispositivo, procurar nos grupos
+        if (!device && that.device_id) {
+            const groups = Array.isArray(that.devices[1]) ? that.devices[1] : [];
+            const wantedId = Array.isArray(that.device_id) ? that.device_id[0] : that.device_id;
+            if (wantedId !== undefined && wantedId !== null && wantedId !== '') {
+                device = groups.find(function (g) { return String(g.id) === String(wantedId); }) || null;
+                if (device) {
+                    that.debug.log('|     👥 [getDevice] selected item is GROUP "' + device.friendly_name + '" (id ' + device.id + ')');
+                }
+            }
         }
         return device;
     }
