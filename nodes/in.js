@@ -119,10 +119,17 @@ module.exports = function(RED) {
             const rawPayload = (data && data.payload && typeof data.payload === 'object') ? data.payload : null;
             node.logger.debug('[Z2M] Granular filtering: raw payload keys [' + (rawPayload ? Object.keys(rawPayload).join(', ') : '-') + ']');
 
+            // 👥 v3.4 grupos: diagnóstico das mensagens vindas de grupos (o id de um grupo é um NÚMERO no Z2M)
+            if (data && data.item && !data.item.ieee_address && data.item.id !== undefined) {
+                node.logger.debug('[Z2M] Group message: "' + data.item.friendly_name + '" (id ' + data.item.id + ') device_id=' + JSON.stringify(node.config.device_id));
+            }
+
             if (node.config.enableMultiple) {
                 if (data.item &&
                     (("ieee_address" in data.item && (node.config.device_id).includes(data.item.ieee_address))
-                        ||  ("id" in data.item && (node.config.device_id).includes(data.item.id)))
+                        // 👥 v3.4 grupos: [ORIGINAL] (node.config.device_id).includes(data.item.id)
+                        //    o array guarda STRINGS ("5") e o id de um grupo é um NÚMERO (5): includes() nunca coincidia
+                        ||  ("id" in data.item && [].concat(node.config.device_id).map(String).includes(String(data.item.id))))
                 ) {
                     node.server.nodeSend(node, {
                         'changed' : data,
