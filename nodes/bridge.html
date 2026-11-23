@@ -283,7 +283,11 @@ RED.nodes.registerType('zigbee2mqtt-eb-bridge', {
     inputs: 1,
     outputs: 1,
     paletteLabel: 'bridge',
-    icon: "icon.png",
+    icon: function () {
+        // Flow Icon definido no nó servidor (reativo); fallback: icon.png
+        var srv = this.server ? RED.nodes.node(this.server) : null;
+        return (srv && srv.flowIcon) ? srv.flowIcon : "icon.png";
+    },
     label: function() {
         return this.name || 'ZigBee2MQTT Bridge';
         },
