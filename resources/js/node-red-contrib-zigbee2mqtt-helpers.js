@@ -17,9 +17,10 @@ if (typeof window !== 'undefined' && typeof window.Z2MI18n === 'undefined') {
             } catch (e) {
                 out = full;
             }
-            // RED._ devolve a própria chave quando falta a tradução
-            if (!out || out === full || out === key) {
-                return (fallback !== undefined) ? fallback : key.replace(/^[^:]*:/, '');
+            // RED._ (i18next) devolve a chave quando falta a tradução: completa OU sem o prefixo "ficheiro:"
+            const bare = key.replace(/^[^:]*:/, '');
+            if (!out || out === full || out === key || out === bare) {
+                return (fallback !== undefined) ? fallback : bare;
             }
             return out;
         }
@@ -122,6 +123,13 @@ class Zigbee2MqttEditor {
         that.debug.log('┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛');
         
         try {
+			// ── sem servidor selecionado não há nada para carregar ("none" = '_ADD_') ──
+            if (!that.hasValidServer()) {
+                that.renderNoServerState();
+                that.bind();   // para que escolher/adicionar um servidor volte a chamar build()
+                return;        // o "finally" do build() liberta o initializing
+            }
+            that.clearNoServerState();
             // ====================================================================
             // FASE 1: CARREGAR DADOS
             // ====================================================================
@@ -2891,7 +2899,81 @@ class Zigbee2MqttEditor {
         window.Z2M_EDITOR_INSTANCES.push(this);
         that.debug.log('🔌 Z2M Editor instance registered globally');
     }
-   
+
+
+	// ═══════════════════════════════════════════════════════════════════════
+    // 🚫 ESTADO "SEM SERVIDOR"
+    // Com server = "none" ('_ADD_' nos selects de config nodes) não há devices nem comandos
+    // para mostrar: em vez de deixar campos vazios/ambíguos, escondem-se os campos dependentes,
+    // desativa-se o select de devices e explica-se o que falta. Escolher/adicionar um servidor
+    // dispara o change.z2m -> build() -> clearNoServerState() e tudo volta ao normal.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /** Há um servidor Zigbee2MQTT realmente selecionado? */
+    hasValidServer() {
+        const v = this.getServerInput().val();
+        return !!v && v !== '_ADD_';
+    }
+
+    /** Linhas do formulário que só fazem sentido com servidor + device (existem conforme o tipo de nó) */
+    getServerDependentRows() {
+        const rows = [];
+        const add = function ($el) { if ($el && $el.length) rows.push($el.closest('.form-row')); };
+        add(this.getDeviceCommandInput());       // out
+        add(this.getDevicePayloadInput());       // out
+        add(this.getDeviceOptionsInput());       // out
+        add(this.getDevicePropertyInput());      // in / get
+        add($('#node-input-filterProperties'));  // in
+        add(this.getRefreshBtn());               // botão "Refresh devices list"
+        return rows;
+    }
+
+    renderNoServerState() {
+        const that = this;
+        const msg = Z2MI18n.t('server:editor.no_server_selected', null,
+            'Select (or add) a Zigbee2MQTT server first: the devices and commands are loaded from it.');
+        that.debug.log('⚠️ [renderNoServerState] no server selected - skipping device/command build');
+
+        // 1) esconder o que depende de devices/comandos (a marca permite repor só o que escondemos aqui)
+        that.getServerDependentRows().forEach(function ($row) {
+            $row.addClass('z2m-hidden-no-server').hide();
+        });
+        // o container dos sliders e o toggle de visibilidade são (re)mostrados por initDynamicUI quando for preciso
+        const $manual = that.getManualControlsContainer();
+        if ($manual) $manual.hide();
+        const $sliderToggle = that.getSliderVisibilityContainer();
+        if ($sliderToggle) $sliderToggle.hide();
+
+        // 2) multiselects vazios e desativados.
+        //    IMPORTANTE: o oneditsave dos nós chama multipleSelect('getSelects') nestes selects; num select
+        //    nunca inicializado isso lança TypeError e o "Done" deixava de gravar.
+        const emptySelect = function ($sel, single, placeholder) {
+            if (!$sel || !$sel.length) return;
+            $sel.children().remove();
+            $sel.multipleSelect('destroy').multipleSelect({
+                single: single, width: 320, dropWidth: 320, placeholder: placeholder,
+                formatAllSelected: function () { return placeholder; }
+            }).multipleSelect('disable');
+        };
+        emptySelect(that.getDeviceIdInput(), !that.isMultiple(), Z2MI18n.t('server:editor.select_device'));
+        emptySelect(that.getDevicePropertyInput(), false, '');
+        emptySelect($('#node-input-filterProperties'), false, '');
+
+        // 3) aviso logo por baixo da linha do servidor (texto via .text(): sem HTML injetável)
+        let $tip = $('#z2m-no-server-tip');
+        if (!$tip.length) {
+            $tip = $('<div/>', { id: 'z2m-no-server-tip', 'class': 'form-tips z2m-field-hint' })
+                .insertAfter(that.getServerInput().closest('.form-row'));
+        }
+        $tip.text(msg).show();
+    }
+
+    clearNoServerState() {
+        $('#z2m-no-server-tip').hide();
+        // repõe só as linhas escondidas por renderNoServerState; as fases seguintes do build()
+        // voltam a esconder o que não se aplica (ex.: device sem comandos, modo múltiplo)
+        $('.z2m-hidden-no-server').removeClass('z2m-hidden-no-server').show();
+    }
     /**
      * Verifica se está em modo múltiplo
      * @returns {boolean}
